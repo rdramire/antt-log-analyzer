@@ -4,7 +4,7 @@ from config import (
     REGEX_RNTRC, REGEX_CIOT, REGEX_EIXO, REGEX_MUNICIPIO
 )
 
-def extract_entities_from_rejections(df_rejections: pl.DataFrame) -> pl.DataFrame:
+def extract_entities_from_rejections(df_rejections: pl.DataFrame, prefix: str = "ent_") -> pl.DataFrame:
     """
     Extrai entidades operacionais das mensagens de rejeição utilizando Polars de forma vetorizada.
     
@@ -160,10 +160,20 @@ def extract_entities_from_rejections(df_rejections: pl.DataFrame) -> pl.DataFram
         df_final = pl.concat(valid_dfs)
         df_final = df_final.unique(subset=["rejeicao_id", "entidade_tipo", "entidade_valor"])
         
+        # Limita para evitar explosão de cardinalidade (máximo de 10 entidades do mesmo tipo por rejeição)
+        df_final = df_final.with_columns(
+            pl.col("entidade_valor").cum_count().over(["rejeicao_id", "entidade_tipo"]).alias("entity_rank")
+        )
+        excess_count = df_final.filter(pl.col("entity_rank") > 10).height
+        if excess_count > 0:
+            print(f"WARNING: Truncated {excess_count} excess entities to prevent cardinality explosion (max 10 of same type per rejection).")
+            
+        df_final = df_final.filter(pl.col("entity_rank") <= 10).drop("entity_rank")
+        
         # Gera ID de Entidade único
         df_final = df_final.with_row_index("index_ent")
         df_final = df_final.with_columns(
-            (pl.lit("ent_") + pl.col("index_ent").cast(pl.String)).alias("entidade_id")
+            (pl.lit(prefix) + pl.col("index_ent").cast(pl.String)).alias("entidade_id")
         )
         return df_final.select(["entidade_id", "rejeicao_id", "entidade_tipo", "entidade_valor"])
         

@@ -11,99 +11,59 @@ def render_overview_tab(conn, where_clause: str):
     """Renderiza o Painel Executivo de Inteligência Operacional ANTT/CIOT."""
     st.markdown("### 📊 Painel Executivo de Inteligência Operacional")
     
-    # 1. Obter KPIs do DuckDB com uma única consulta agregada de alto desempenho
     kpis = conn.execute(f"""
         SELECT 
             COUNT(p.log_id) as total_requests,
             COUNT(DISTINCT p.protocolo) as unique_protocols,
             COUNT(DISTINCT p.contratante) as total_contratantes,
-            COUNT(r.rejeicao_id) as total_rejections,
-            COUNT(DISTINCT CASE WHEN r.rejeicao_id IS NOT NULL THEN p.contratante END) as clientes_afetados,
-            COUNT(CASE WHEN r.categoria_operacional IN ('PLACA', 'LOCALIZAÇÃO', 'CARGA', 'VALIDAÇÃO', 'DATA', 'JANELA OPERACIONAL', 'TOLERÂNCIA') THEN 1 END) as count_evitavel,
-            COUNT(CASE WHEN r.categoria_operacional IN ('TRANSPORTADOR', 'PAGAMENTO', 'CIOT') THEN 1 END) as count_parcial,
-            COUNT(CASE WHEN r.categoria_operacional IN ('INTEGRAÇÃO', 'SISTEMA', 'OUTROS_NAO_CATEGORIZADO') THEN 1 END) as count_nao_evitavel,
-            COUNT(CASE WHEN r.severidade = 'CRITICA' THEN 1 END) as count_critica,
-            COUNT(CASE WHEN r.severidade = 'ALTA' THEN 1 END) as count_alta,
-            COUNT(CASE WHEN r.severidade = 'MEDIA' THEN 1 END) as count_media,
-            COUNT(CASE WHEN r.severidade = 'BAIXA' THEN 1 END) as count_baixa
+            COUNT(CASE WHEN p.status_geral = 'SUCESSO' THEN 1 END) as count_sucesso,
+            COUNT(CASE WHEN p.status_geral = 'ERRO' THEN 1 END) as count_erro,
+            (
+                SELECT COUNT(*) FROM (
+                    SELECT p2.contratante 
+                    FROM dim_log p2 
+                    WHERE p2.status_geral = 'ERRO' AND {where_clause.replace("p.", "p2.")} 
+                    GROUP BY p2.contratante 
+                    HAVING COUNT(p2.log_id) >= 3
+                )
+            ) as clientes_afetados,
+            COUNT(CASE WHEN r.severidade = 'CRITICO' AND p.status_geral = 'ERRO' THEN 1 END) as count_critico,
+            COUNT(CASE WHEN r.severidade = 'ALTO' AND p.status_geral = 'ERRO' THEN 1 END) as count_alto,
+            COUNT(CASE WHEN r.severidade = 'MEDIO' AND p.status_geral = 'ERRO' THEN 1 END) as count_medio,
+            COUNT(CASE WHEN r.severidade = 'BAIXO' AND p.status_geral = 'ERRO' THEN 1 END) as count_baixo,
+            COUNT(CASE WHEN p.status_geral = 'ERRO' AND r.categoria_operacional IN ('PLACA', 'LOCALIZAÇÃO', 'CARGA', 'VALIDAÇÃO', 'DATA', 'JANELA OPERACIONAL', 'TOLERÂNCIA') THEN 1 END) as count_evitavel,
+            COUNT(CASE WHEN p.status_geral = 'ERRO' AND r.rejeicao_id IS NOT NULL THEN 1 END) as total_rejeicoes_fatos
         FROM dim_log p
         LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
         WHERE {where_clause};
     """).fetchone()
     
-    total_logs, unique_protocols, total_contratantes, total_rejections, clientes_afetados, count_evitavel, count_parcial, count_nao_evitavel, count_critica, count_alta, count_media, count_baixa = kpis
+    total_logs, unique_protocols, total_contratantes, count_sucesso, count_erro, clientes_afetados, count_critico, count_alto, count_medio, count_baixo, count_evitavel, total_rejeicoes_fatos = kpis
     
     if total_logs == 0:
         st.info("Nenhum log encontrado para os filtros selecionados.")
         return
         
     # Calcular Score Operacional Geral
-    penalties = (count_critica * 1.0) + (count_alta * 0.5) + (count_media * 0.2) + (count_baixa * 0.1)
+    penalties = (count_critico * 1.0) + (count_alto * 0.5) + (count_medio * 0.2) + (count_baixo * 0.1)
     score_operacional = max(0.0, 100.0 - (penalties / total_logs) * 100.0) if total_logs > 0 else 100.0
     
-    # Calcular taxa de reincidência de entidades
-    reinc_query = conn.execute(f"""
-        WITH entity_counts AS (
-            SELECT e.entidade_valor, COUNT(*) as cnt
-            FROM fact_entidades_extraidas e
-            JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
-            JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
-            GROUP BY e.entidade_valor
-        )
-        SELECT 
-            COALESCE(SUM(CASE WHEN cnt > 1 THEN cnt ELSE 0 END) * 100.0 / NULLIF(SUM(cnt), 0), 0.0) as reinc_rate
-        FROM entity_counts;
-    """).fetchone()
-    reinc_rate = reinc_query[0] if reinc_query else 0.0
+    # Taxas Executivas
+    rate_sucesso = (count_sucesso * 100.0 / total_logs) if total_logs > 0 else 100.0
+    rate_evitabilidade = (count_evitavel * 100.0 / count_erro) if count_erro > 0 else 0.0
     
-    # Top Causa Raiz
-    top_causa_query = conn.execute(f"""
-        SELECT r.categoria_operacional, COUNT(*) as volume
-        FROM fact_rejeicoes_semanticas r
-        JOIN dim_log p ON p.log_id = r.log_id
-        WHERE {where_clause}
-        GROUP BY 1
-        ORDER BY 2 DESC
-        LIMIT 1;
-    """).fetchone()
-    top_causa = top_causa_query[0] if top_causa_query else "N/A"
-    
-    # Top Rejeição Semântica
-    top_rejeicao_query = conn.execute(f"""
-        SELECT r.tipo_rejeicao_semantica, COUNT(*) as volume
-        FROM fact_rejeicoes_semanticas r
-        JOIN dim_log p ON p.log_id = r.log_id
-        WHERE {where_clause}
-        GROUP BY 1
-        ORDER BY 2 DESC
-        LIMIT 1;
-    """).fetchone()
-    top_rejeicao = top_rejeicao_query[0] if top_rejeicao_query else "N/A"
-    
-    # Porcentagem Evitável
-    perc_evitavel = (count_evitavel * 100.0 / total_rejections) if total_rejections > 0 else 0.0
-    
-    # Renderizar Grade de KPIs (4x2)
-    col1, col2, col3, col4 = st.columns(4)
+    # Renderizar Grade de KPIs (5x1)
+    col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        render_metric_card("Total de Rejeições", f"{total_rejections:,}".replace(",", "."), f"Em {total_logs:,} requisições", "down" if total_rejections > 0 else "info")
+        render_metric_card("Taxa Sucesso Operacional", f"{rate_sucesso:.1f}%", f"{count_sucesso} chamadas concluídas", "up" if rate_sucesso > 90 else "down")
     with col2:
-        render_metric_card("Erros Evitáveis", f"{perc_evitavel:.1f}%", f"{count_evitavel} falhas de cadastro/dados", "up" if perc_evitavel > 70 else "info")
+        render_metric_card("Total de Rejeições", f"{count_erro}", f"{unique_protocols} protocolos únicos", "down" if count_erro > 0 else "info")
     with col3:
         render_metric_card("Clientes Afetados", f"{clientes_afetados}", f"De {total_contratantes} ativos", "down" if clientes_afetados > 2 else "info")
     with col4:
-        render_metric_card("Score Médio Geral", f"{score_operacional:.2f}%", f"Penalidades: {penalties:.1f}", "up" if score_operacional > 90 else "down")
-        
-    col5, col6, col7, col8 = st.columns(4)
+        render_metric_card("Score Operacional", f"{score_operacional:.2f}%", f"Penalidades: {penalties:.1f}", "up" if score_operacional > 90 else "down")
     with col5:
-        render_metric_card("Taxa de Reincidência", f"{reinc_rate:.1f}%", "Falhas repetidas de entidades", "down" if reinc_rate > 30 else "up")
-    with col6:
-        render_metric_card("Top Causa Raiz", f"{top_causa}", "Categoria de erro principal", "info")
-    with col7:
-        render_metric_card("Top Rejeição", f"{top_rejeicao.replace('_', ' ')[:25]}", "Template semântico mais comum", "info")
-    with col8:
-        render_metric_card("Volume Total Logs", f"{total_logs:,}".replace(",", "."), f"{unique_protocols:,} protocolos", "info")
+        render_metric_card("Taxa de Evitabilidade", f"{rate_evitabilidade:.1f}%", f"{count_evitavel} erros evitáveis", "info")
         
     # Painel de Auditoria
     with st.expander("🔍 Auditoria da Fórmula do Score Operacional"):
@@ -116,10 +76,10 @@ def render_overview_tab(conn, where_clause: str):
             **Detalhamento Geral da Operação:**
             * **Total de Requisições:** `{total_logs}`
             * **Rejeições por Severidade:**
-              * 🛑 **CRÍTICA (-1.0):** `{count_critica}` ocorrências
-              * ⚠️ **ALTA (-0.5):** `{count_alta}` ocorrências
-              * 🟡 **MÉDIA (-0.2):** `{count_media}` ocorrências
-              * 🟢 **BAIXA (-0.1):** `{count_baixa}` ocorrências
+              * 🛑 **CRÍTICO (-1.0):** `{count_critico}` ocorrências
+              * ⚠️ **ALTO (-0.5):** `{count_alto}` ocorrências
+              * 🟡 **MÉDIO (-0.2):** `{count_medio}` ocorrências
+              * 🟢 **BAIXO (-0.1):** `{count_baixo}` ocorrências
             * **Soma Total de Penalidades:** `{penalties:.1f}` pontos
             * **Cálculo Aplicado:**
               $$Score = \\max\\left(0,\\, 100 - \\left( \\frac{{{penalties:.1f}}}{{{total_logs}}} \\times 100 \\right)\\right) = {score_operacional:.2f}\\%$$
@@ -127,12 +87,73 @@ def render_overview_tab(conn, where_clause: str):
         )
         
     st.markdown("---")
+    
+    # Seção: Insights Executivos Inteligentes e Diagnósticos Automáticos
+    st.markdown("##### 💡 Insights Executivos e Diagnósticos Automáticos")
+    top_causa_name = "N/A"
+    top_causa_pct = 0.0
+    top_causa_query = conn.execute(f"""
+        SELECT r.categoria_operacional, COUNT(*) as errors
+        FROM fact_rejeicoes_semanticas r
+        JOIN dim_log p ON p.log_id = r.log_id
+        WHERE {where_clause} AND p.status_geral = 'ERRO'
+        GROUP BY 1
+        ORDER BY 2 DESC
+        LIMIT 1;
+    """).fetchone()
+    if total_rejeicoes_fatos > 0 and top_causa_query:
+        top_causa_name = top_causa_query[0]
+        top_causa_pct = (top_causa_query[1] * 100.0 / total_rejeicoes_fatos)
+        
+    top_func_name = "N/A"
+    top_func_pct = 0.0
+    top_func_query = conn.execute(f"""
+        SELECT p.funcionalidade, COUNT(p.log_id) as errors
+        FROM dim_log p
+        WHERE {where_clause} AND p.status_geral = 'ERRO'
+        GROUP BY p.funcionalidade
+        ORDER BY errors DESC
+        LIMIT 1;
+    """).fetchone()
+    if count_erro > 0 and top_func_query:
+        top_func_name = top_func_query[0]
+        top_func_pct = (top_func_query[1] * 100.0 / count_erro)
+        
+    top2_share = 0.0
+    num_top_clients = 0
+    top_contratantes_share_query = conn.execute(f"""
+        SELECT p.contratante, COUNT(DISTINCT p.protocolo) as errors
+        FROM dim_log p
+        WHERE {where_clause} AND p.status_geral = 'ERRO'
+        GROUP BY p.contratante
+        ORDER BY errors DESC
+        LIMIT 2;
+    """).fetchall()
+    if count_erro > 0 and top_contratantes_share_query:
+        top2_errors = sum(row[1] for row in top_contratantes_share_query)
+        top2_share = (top2_errors * 100.0 / count_erro)
+        num_top_clients = len(top_contratantes_share_query)
+
+    insights_text = ""
+    if count_erro > 0:
+        insights_text += f"- 🎯 **{top_causa_pct:.1f}% das falhas** de negócio estão relacionadas a inconsistências de **{top_causa_name}**.\n"
+        insights_text += f"- ⚡ A funcionalidade **{top_func_name}** é a mais problemática, concentrando **{top_func_pct:.1f}% dos erros** operacionais.\n"
+        insights_text += f"- 🛡️ **{rate_evitabilidade:.1f}% das falhas** são classificadas como **evitáveis** por meio de saneamento cadastral na origem.\n"
+        if num_top_clients > 0:
+            insights_text += f"- 👥 Os **{num_top_clients} contratante(s) principal(is)** com pendências representa(m) **{top2_share:.1f}% de todas as rejeições** operacionais reais."
+    else:
+        insights_text = "✨ **Operação 100% Estável:** Nenhum erro registrado para o período ou filtros selecionados."
+        
+    st.info(insights_text)
+    
+    st.markdown("---")
+    
     # Seção 2: Top 10 Contratantes e Top 10 Rejeições
     gcol1, gcol2 = st.columns([1.2, 1])
     
     with gcol1:
         st.markdown("##### 🏆 Top 10 Contratantes com Mais Rejeições")
-        st.caption("Ranking de clientes ordenado por volume de rejeições baseado em protocolos únicos.")
+        st.caption("Clientes que apresentam maior volume de falhas operacionais baseado em protocolos únicos.")
         df_top_clients = conn.execute(f"""
             WITH client_rejections AS (
                 SELECT 
@@ -140,18 +161,17 @@ def render_overview_tab(conn, where_clause: str):
                     COUNT(DISTINCT p.protocolo) as total_rejeicoes,
                     COUNT(DISTINCT p.protocolo) * 100.0 / SUM(COUNT(DISTINCT p.protocolo)) OVER () as percentual
                 FROM dim_log p
-                JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-                WHERE {where_clause}
+                WHERE {where_clause} AND p.status_geral = 'ERRO'
                 GROUP BY p.contratante
             ),
             client_score AS (
                 SELECT 
                     p.contratante,
                     COUNT(p.log_id) as total_logs,
-                    COUNT(CASE WHEN r.severidade = 'CRITICA' THEN 1 END) as count_critica,
-                    COUNT(CASE WHEN r.severidade = 'ALTA' THEN 1 END) as count_alta,
-                    COUNT(CASE WHEN r.severidade = 'MEDIA' THEN 1 END) as count_media,
-                    COUNT(CASE WHEN r.severidade = 'BAIXA' THEN 1 END) as count_baixa
+                    COUNT(CASE WHEN r.severidade = 'CRITICO' AND p.status_geral = 'ERRO' THEN 1 END) as count_critico,
+                    COUNT(CASE WHEN r.severidade = 'ALTO' AND p.status_geral = 'ERRO' THEN 1 END) as count_alto,
+                    COUNT(CASE WHEN r.severidade = 'MEDIO' AND p.status_geral = 'ERRO' THEN 1 END) as count_medio,
+                    COUNT(CASE WHEN r.severidade = 'BAIXO' AND p.status_geral = 'ERRO' THEN 1 END) as count_baixo
                 FROM dim_log p
                 LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
                 WHERE {where_clause}
@@ -164,7 +184,7 @@ def render_overview_tab(conn, where_clause: str):
                     ROW_NUMBER() OVER (PARTITION BY contratante ORDER BY COUNT(*) DESC) as rn
                 FROM dim_log p
                 JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-                WHERE {where_clause}
+                WHERE {where_clause} AND p.status_geral = 'ERRO'
                 GROUP BY contratante, tipo_rejeicao_semantica
             ),
             client_top_func AS (
@@ -174,14 +194,14 @@ def render_overview_tab(conn, where_clause: str):
                     ROW_NUMBER() OVER (PARTITION BY contratante ORDER BY COUNT(*) DESC) as rn
                 FROM dim_log p
                 JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-                WHERE {where_clause}
+                WHERE {where_clause} AND p.status_geral = 'ERRO'
                 GROUP BY contratante, funcionalidade
             )
             SELECT 
                 cr.contratante as "Contratante",
                 cr.total_rejeicoes as "Total Rejeições",
                 cr.percentual as "Percentual do Total",
-                MAX(GREATEST(0.0, 100.0 - ((cs.count_critica * 1.0 + cs.count_alta * 0.5 + cs.count_media * 0.2 + cs.count_baixa * 0.1) / NULLIF(cs.total_logs, 0)) * 100.0)) as "Score Operacional",
+                MAX(GREATEST(0.0, 100.0 - ((cs.count_critico * 1.0 + cs.count_alto * 0.5 + cs.count_medio * 0.2 + cs.count_baixo * 0.1) / NULLIF(cs.total_logs, 0)) * 100.0)) as "Score Operacional",
                 tr.principal_rejeicao as "Principal Rejeição",
                 tf.principal_funcionalidade as "Principal Funcionalidade"
             FROM client_rejections cr
@@ -217,10 +237,10 @@ def render_overview_tab(conn, where_clause: str):
             )
         else:
             st.info("Nenhum dado de cliente disponível.")
-
+            
     with gcol2:
         st.markdown("##### 🏆 Top 10 Rejeições Semânticas")
-        st.caption("Rejeições semânticas oficiais mais ocorrentes ordenadas por volume.")
+        st.caption("Rejeições semânticas da ANTT com maior volume de ocorrências.")
         df_top_rejs = conn.execute(f"""
             SELECT 
                 r.tipo_rejeicao_semantica, 
@@ -228,7 +248,7 @@ def render_overview_tab(conn, where_clause: str):
                 COUNT(*) * 100.0 / SUM(COUNT(*)) OVER () as percentual
             FROM fact_rejeicoes_semanticas r
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
+            WHERE {where_clause} AND p.status_geral = 'ERRO'
             GROUP BY 1
             ORDER BY 2 DESC
             LIMIT 10;
@@ -242,7 +262,7 @@ def render_overview_tab(conn, where_clause: str):
                 orientation="h",
                 text=df_top_rejs.apply(lambda r: f"{r['volume']} ({r['percentual']:.1f}%)", axis=1),
                 color="volume",
-                color_continuous_scale="Viridis",
+                color_continuous_scale="Reds",
                 labels={"volume": "Volume de Ocorrências", "tipo_rejeicao_semantica": "Rejeição Semântica"}
             )
             fig_top_rejs.update_layout(
@@ -260,20 +280,19 @@ def render_overview_tab(conn, where_clause: str):
             
     st.markdown("---")
     
-    # Seção 3: Top Funcionalidades e Matriz de Impacto
+    # Seção 3: Top Funcionalidades Problemáticas & Heatmap de Severidade
     gcol_f1, gcol_f2 = st.columns([1.2, 1])
     
     with gcol_f1:
-        st.markdown("##### ⚡ Top Funcionalidades com Mais Rejeições")
-        st.caption("Volumetria de erros cadastrais e de sistema agrupados por endpoint operacional.")
+        st.markdown("##### ⚡ Top Funcionalidades Problemáticas")
+        st.caption("Endpoints operacionais ordenados pela quantidade absoluta de erros.")
         df_top_funcs = conn.execute(f"""
-            WITH func_base AS (
+            WITH func_err_metrics AS (
                 SELECT 
                     p.funcionalidade,
-                    COUNT(DISTINCT p.protocolo) as quantidade_erros,
-                    COUNT(DISTINCT p.protocolo) * 100.0 / SUM(COUNT(DISTINCT p.protocolo)) OVER () as percentual
+                    COUNT(p.log_id) as total_chamadas,
+                    COUNT(CASE WHEN p.status_geral = 'ERRO' THEN 1 END) as total_erros
                 FROM dim_log p
-                JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
                 WHERE {where_clause}
                 GROUP BY p.funcionalidade
             ),
@@ -284,96 +303,93 @@ def render_overview_tab(conn, where_clause: str):
                     ROW_NUMBER() OVER (PARTITION BY p.funcionalidade ORDER BY COUNT(*) DESC) as rn
                 FROM dim_log p
                 JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-                WHERE {where_clause}
+                WHERE {where_clause} AND p.status_geral = 'ERRO'
                 GROUP BY p.funcionalidade, r.tipo_rejeicao_semantica
             ),
-            func_top_sev AS (
+            func_top_severity AS (
                 SELECT 
                     p.funcionalidade,
-                    r.severidade,
+                    r.severidade as severidade_predominante,
                     ROW_NUMBER() OVER (PARTITION BY p.funcionalidade ORDER BY COUNT(*) DESC) as rn
                 FROM dim_log p
                 JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-                WHERE {where_clause}
+                WHERE {where_clause} AND p.status_geral = 'ERRO'
                 GROUP BY p.funcionalidade, r.severidade
             )
             SELECT 
-                fb.funcionalidade as "Funcionalidade",
-                fb.quantidade_erros as "Quantidade Erros",
-                fb.percentual as "Percentual",
-                tr.principal_rejeicao as "Principal Rejeição",
-                ts.severidade as "Severidade Predominante"
-            FROM func_base fb
-            LEFT JOIN func_top_rejection tr ON fb.funcionalidade = tr.funcionalidade AND tr.rn = 1
-            LEFT JOIN func_top_sev ts ON fb.funcionalidade = ts.funcionalidade AND ts.rn = 1
-            ORDER BY fb.quantidade_erros DESC;
+                fm.funcionalidade as "Funcionalidade",
+                fm.total_erros as "Total Erros",
+                (fm.total_erros * 100.0 / NULLIF(fm.total_chamadas, 0)) as "Taxa Erro (%)",
+                COALESCE(tr.principal_rejeicao, 'Nenhuma') as "Principal Rejeição",
+                COALESCE(ts.severidade_predominante, 'INFO') as "Severidade Predominante"
+            FROM func_err_metrics fm
+            LEFT JOIN func_top_rejection tr ON fm.funcionalidade = tr.funcionalidade AND tr.rn = 1
+            LEFT JOIN func_top_severity ts ON fm.funcionalidade = ts.funcionalidade AND ts.rn = 1
+            WHERE fm.total_erros > 0
+            ORDER BY fm.total_erros DESC;
         """).df()
         
         if not df_top_funcs.empty:
-            fig_top_funcs = px.bar(
+            st.dataframe(
                 df_top_funcs,
-                x="Quantidade Erros",
-                y="Funcionalidade",
-                orientation="h",
-                text=df_top_funcs.apply(lambda r: f"{r['Quantidade Erros']} ({r['Percentual']:.1f}%)", axis=1),
-                color="Quantidade Erros",
-                color_continuous_scale="Reds",
-                hover_data=["Principal Rejeição", "Severidade Predominante"],
-                labels={"Quantidade Erros": "Quantidade de Erros", "Funcionalidade": "Funcionalidade"}
+                column_config={
+                    "Total Erros": st.column_config.NumberColumn("Erros", format="%d"),
+                    "Taxa Erro (%)": st.column_config.NumberColumn("Taxa Erro", format="%.1f%%")
+                },
+                use_container_width=True,
+                hide_index=True
             )
-            fig_top_funcs.update_layout(
-                yaxis=dict(autorange="reversed"),
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font_color='#ffffff',
-                showlegend=False,
-                margin=dict(t=10, b=10, l=10, r=10),
-                coloraxis_showscale=False
-            )
-            st.plotly_chart(fig_top_funcs, use_container_width=True)
         else:
-            st.info("Nenhum dado de funcionalidade disponível.")
+            st.success("Operação normalizada: Zero erros por funcionalidade.")
             
     with gcol_f2:
-        st.markdown("##### 🎯 Matriz de Impacto e Severidade")
-        st.caption("Cruzamento de volume (X) vs severidade (Y) para identificar falhas críticas silenciosas ou massivas.")
-        df_bubble = conn.execute(f"""
+        st.markdown("##### 🎯 Heatmap de Severidade e Concentração de Erros")
+        st.caption("Concentração de falhas severas mapeadas pelas principais funcionalidades (Top 10).")
+        
+        df_heatmap_raw = conn.execute(f"""
             SELECT 
-                r.tipo_rejeicao_semantica,
-                COUNT(r.rejeicao_id) as volume,
+                p.funcionalidade,
                 r.severidade,
-                COUNT(DISTINCT p.contratante) as clientes_impactados
-            FROM fact_rejeicoes_semanticas r
-            JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
-            GROUP BY 1, 3
+                COUNT(r.rejeicao_id) as volume
+            FROM dim_log p
+            JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
+            WHERE {where_clause} AND p.status_geral = 'ERRO'
+            GROUP BY 1, 2
             ORDER BY volume DESC;
         """).df()
         
-        if not df_bubble.empty:
-            fig_bubble = px.scatter(
-                df_bubble,
-                x="volume",
-                y="severidade",
-                size="clientes_impactados",
-                color="severidade",
-                hover_name="tipo_rejeicao_semantica",
-                size_max=35,
-                color_discrete_map={"CRITICA": "#ef4444", "ALTA": "#f97316", "MEDIA": "#eab308", "BAIXA": "#3b82f6"},
-                labels={"volume": "Volume de Ocorrências", "severidade": "Severidade (Impacto)", "clientes_impactados": "Clientes Impactados"},
-                category_orders={"severidade": ["BAIXA", "MEDIA", "ALTA", "CRITICA"]}
+        if not df_heatmap_raw.empty:
+            # Seleciona as top 10 funcionalidades com mais erros
+            top_funcs_heatmap = df_heatmap_raw.groupby("funcionalidade")["volume"].sum().nlargest(10).index
+            df_heatmap_filtered = df_heatmap_raw[df_heatmap_raw["funcionalidade"].isin(top_funcs_heatmap)]
+            
+            df_pivot = df_heatmap_filtered.pivot(index="funcionalidade", columns="severidade", values="volume").fillna(0).astype(int)
+            
+            # Garante e ordena colunas
+            for c in ["BAIXO", "MEDIO", "ALTO", "CRITICO"]:
+                if c not in df_pivot.columns:
+                    df_pivot[c] = 0
+            df_pivot = df_pivot[["BAIXO", "MEDIO", "ALTO", "CRITICO"]]
+            
+            fig_heatmap = px.imshow(
+                df_pivot,
+                labels=dict(x="Severidade", y="Funcionalidade", color="Volume Erros"),
+                x=df_pivot.columns,
+                y=df_pivot.index,
+                color_continuous_scale="Reds",
+                aspect="auto",
+                text_auto=True
             )
-            fig_bubble.update_layout(
+            fig_heatmap.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font_color='#ffffff',
                 margin=dict(t=10, b=10, l=10, r=10),
-                xaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.05)'),
-                yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.05)')
+                coloraxis_showscale=False
             )
-            st.plotly_chart(fig_bubble, use_container_width=True)
+            st.plotly_chart(fig_heatmap, use_container_width=True)
         else:
-            st.info("Matriz indisponível sem dados de falhas.")
+            st.info("Heatmap indisponível sem dados de falhas.")
             
     st.markdown("---")
     
@@ -381,78 +397,141 @@ def render_overview_tab(conn, where_clause: str):
     gcol3, gcol4 = st.columns([1, 1])
     
     with gcol3:
-        st.markdown("##### 🍩 Evitabilidade das Rejeições")
-        st.caption("Classificação operacional para guiar estratégias de redução de chamados e suporte.")
+        st.markdown("##### 📊 Evitabilidade das Rejeições")
+        st.caption("Classificação operacional recomendada para ações corretivas de suporte.")
         df_evit = conn.execute(f"""
             SELECT 
                 CASE 
                     WHEN r.categoria_operacional IN ('PLACA', 'LOCALIZAÇÃO', 'CARGA', 'VALIDAÇÃO', 'DATA', 'JANELA OPERACIONAL', 'TOLERÂNCIA') THEN 'Evitável (Dados/Cadastro)'
                     WHEN r.categoria_operacional IN ('TRANSPORTADOR', 'PAGAMENTO', 'CIOT') THEN 'Parcialmente Evitável (Processo)'
-                    ELSE 'Não Evitável (Integração/Sistema)'
+                    WHEN r.categoria_operacional IN ('INTEGRAÇÃO', 'SISTEMA') THEN 'Não Evitável (Integração/Sistema)'
+                    ELSE 'Não Classificado'
                 END as classe_evitabilidade,
                 COUNT(*) as total
             FROM fact_rejeicoes_semanticas r
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
+            WHERE {where_clause} AND p.status_geral = 'ERRO'
             GROUP BY 1;
         """).df()
         
         if not df_evit.empty:
-            fig_donut = px.pie(
+            total_evit = df_evit["total"].sum()
+            df_evit["percentual"] = df_evit["total"].apply(lambda x: (x * 100.0 / total_evit) if total_evit > 0 else 0.0)
+            
+            desc_map = {
+                'Evitável (Dados/Cadastro)': 'Evitável: Erros causados por dados incorretos ou inconsistências cadastrais.',
+                'Parcialmente Evitável (Processo)': 'Parcialmente Evitável: Rejeições cadastrais do transportador ou do RNTRC.',
+                'Não Evitável (Integração/Sistema)': 'Não Evitável: Instabilidade, timeouts ou falhas de rede da ANTT.',
+                'Não Classificado': 'Não Classificado: Outras mensagens sem categorização de evitabilidade definida.'
+            }
+            df_evit["descricao"] = df_evit["classe_evitabilidade"].map(desc_map)
+            
+            fig_evit_bars = px.bar(
                 df_evit,
-                values="total",
-                names="classe_evitabilidade",
-                hole=0.5,
+                x="total",
+                y="classe_evitabilidade",
+                orientation="h",
+                text=df_evit.apply(lambda r: f"{r['total']} ({r['percentual']:.1f}%)", axis=1),
                 color="classe_evitabilidade",
                 color_discrete_map={
                     "Evitável (Dados/Cadastro)": "#10b981", 
                     "Parcialmente Evitável (Processo)": "#f59e0b", 
-                    "Não Evitável (Integração/Sistema)": "#ef4444"
-                }
+                    "Não Evitável (Integração/Sistema)": "#ef4444",
+                    "Não Classificado": "#6b7280"
+                },
+                hover_data=["descricao"],
+                labels={"total": "Volume de Erros", "classe_evitabilidade": "Evitabilidade"}
             )
-            fig_donut.update_layout(
+            fig_evit_bars.update_layout(
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font_color='#ffffff',
+                showlegend=False,
                 margin=dict(t=10, b=10, l=10, r=10),
-                legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5)
+                xaxis_title="Volume de Ocorrências",
+                yaxis_title=None
             )
-            st.plotly_chart(fig_donut, use_container_width=True)
+            st.plotly_chart(fig_evit_bars, use_container_width=True)
         else:
-            st.success("Zero erros cadastrais/processuais.")
+            st.success("Zero erros registrados no período.")
             
     with gcol4:
         st.markdown("##### 📈 Maturidade Cadastral Global")
-        st.caption("Índice de conformidade do cadastro por tipo de dado (taxa de sucesso cadastral).")
+        st.caption("Conformidade cadastral real calculada por domínio operacional de erros cadastrados.")
         
         df_quality = conn.execute(f"""
             SELECT
-                100.0 - (COUNT(CASE WHEN r.tipo_rejeicao_semantica = 'PLACA_SEM_VINCULO_RNTRC' THEN 1 END) * 100.0 / NULLIF(COUNT(p.log_id), 0)) as placa_qualidade,
-                100.0 - (COUNT(CASE WHEN r.tipo_rejeicao_semantica = 'TRANSPORTADOR_NAO_ENCONTRADO' THEN 1 END) * 100.0 / NULLIF(COUNT(p.log_id), 0)) as rntrc_qualidade,
-                100.0 - (COUNT(CASE WHEN r.tipo_rejeicao_semantica = 'LOCALIZACAO_ORIGEM_INVALIDA' THEN 1 END) * 100.0 / NULLIF(COUNT(p.log_id), 0)) as cep_qualidade,
-                100.0 - (COUNT(CASE WHEN r.tipo_rejeicao_semantica = 'MUNICIPIO_DESTINO_INVALIDO' THEN 1 END) * 100.0 / NULLIF(COUNT(p.log_id), 0)) as municipio_qualidade
+                -- Placa Quality
+                COUNT(CASE WHEN r.categoria_operacional = 'PLACA' AND p.status_geral = 'ERRO' THEN 1 END) as placa_sem_vinculo,
+                COUNT(CASE WHEN p.funcionalidade IN ('Emitir CIOT', 'Retificar CIOT') THEN 1 END) as total_operacoes_placa,
+                
+                -- RNTRC Quality
+                COUNT(CASE WHEN (r.categoria_operacional = 'TRANSPORTADOR' OR r.tipo_rejeicao_semantica IN ('TRANSPORTADOR_NAO_ENCONTRADO', 'RNTRC_INATIVO')) AND p.status_geral = 'ERRO' AND EXISTS (SELECT 1 FROM fact_entidades_extraidas e WHERE e.rejeicao_id = r.rejeicao_id AND e.entidade_tipo = 'RNTRC') THEN 1 END) as rntrc_sem_cadastro,
+                COUNT(CASE WHEN p.funcionalidade IN ('Emitir CIOT', 'Retificar CIOT', 'Consultar CIOT') THEN 1 END) as total_operacoes_rntrc,
+                
+                -- CEP Quality
+                COUNT(CASE WHEN (r.categoria_operacional IN ('GEOLOCALIZACAO', 'LOCALIZAÇÃO') OR r.tipo_rejeicao_semantica IN ('LOCALIZACAO_ORIGEM_INVALIDA', 'CEP_NAO_CADASTRADO')) AND p.status_geral = 'ERRO' AND EXISTS (SELECT 1 FROM fact_entidades_extraidas e WHERE e.rejeicao_id = r.rejeicao_id AND e.entidade_tipo = 'CEP') THEN 1 END) as cep_invalido,
+                COUNT(CASE WHEN p.funcionalidade IN ('Emitir CIOT', 'Retificar CIOT') THEN 1 END) as total_operacoes_cep,
+                
+                -- Município Quality
+                COUNT(CASE WHEN (r.categoria_operacional IN ('GEOLOCALIZACAO', 'LOCALIZAÇÃO') OR r.tipo_rejeicao_semantica IN ('MUNICIPIO_DESTINO_INVALIDO', 'MUNICIPIO_INVALIDO')) AND p.status_geral = 'ERRO' AND EXISTS (SELECT 1 FROM fact_entidades_extraidas e WHERE e.rejeicao_id = r.rejeicao_id AND e.entidade_tipo = 'MUNICIPIO') THEN 1 END) as municipio_invalido,
+                COUNT(CASE WHEN p.funcionalidade IN ('Emitir CIOT', 'Retificar CIOT') THEN 1 END) as total_operacoes_municipio,
+                
+                -- CPF/CNPJ Quality
+                COUNT(CASE WHEN (r.categoria_operacional = 'TRANSPORTADOR' OR r.tipo_rejeicao_semantica = 'TRANSPORTADOR_NAO_ENCONTRADO') AND p.status_geral = 'ERRO' AND EXISTS (SELECT 1 FROM fact_entidades_extraidas e WHERE e.rejeicao_id = r.rejeicao_id AND e.entidade_tipo IN ('CPF', 'CNPJ', 'DOC')) THEN 1 END) as cpf_cnpj_invalido,
+                COUNT(CASE WHEN p.funcionalidade IN ('Emitir CIOT', 'Retificar CIOT', 'Consultar CIOT') THEN 1 END) as total_operacoes_cpf_cnpj
             FROM dim_log p
             LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
             WHERE {where_clause}
         """).df()
         
         if not df_quality.empty:
-            placa_q = max(0.0, min(100.0, df_quality.iloc[0]["placa_qualidade"]))
-            rntrc_q = max(0.0, min(100.0, df_quality.iloc[0]["rntrc_qualidade"]))
-            cep_q = max(0.0, min(100.0, df_quality.iloc[0]["cep_qualidade"]))
-            mun_q = max(0.0, min(100.0, df_quality.iloc[0]["municipio_qualidade"]))
+            row = df_quality.iloc[0]
             
-            st.write(f"**Qualidade de Placas (Vínculo ANTT):** {placa_q:.1f}%")
-            st.progress(placa_q / 100.0)
-            
-            st.write(f"**Qualidade de RNTRCs (Transportador Ativo):** {rntrc_q:.1f}%")
-            st.progress(rntrc_q / 100.0)
-            
-            st.write(f"**Qualidade de CEPs (Geolocalização):** {cep_q:.1f}%")
-            st.progress(cep_q / 100.0)
-            
-            st.write(f"**Qualidade de Municípios (Cód IBGE):** {mun_q:.1f}%")
-            st.progress(mun_q / 100.0)
+            # Placa
+            if row["total_operacoes_placa"] > 0:
+                placa_q = max(0.0, 100.0 * (1.0 - (row["placa_sem_vinculo"] / row["total_operacoes_placa"])))
+                st.write(f"**Qualidade de Placas (Vínculo ANTT):** {placa_q:.1f}%")
+                st.progress(placa_q / 100.0)
+            else:
+                st.write("**Qualidade de Placas (Vínculo ANTT):** Sem operações registradas")
+                st.progress(0.0)
+                
+            # RNTRC
+            if row["total_operacoes_rntrc"] > 0:
+                rntrc_q = max(0.0, 100.0 * (1.0 - (row["rntrc_sem_cadastro"] / row["total_operacoes_rntrc"])))
+                st.write(f"**Qualidade de RNTRCs (Transportador Ativo):** {rntrc_q:.1f}%")
+                st.progress(rntrc_q / 100.0)
+            else:
+                st.write("**Qualidade de RNTRCs (Transportador Ativo):** Sem operações registradas")
+                st.progress(0.0)
+                
+            # CEP
+            if row["total_operacoes_cep"] > 0:
+                cep_q = max(0.0, 100.0 * (1.0 - (row["cep_invalido"] / row["total_operacoes_cep"])))
+                st.write(f"**Qualidade de CEPs (Geolocalização):** {cep_q:.1f}%")
+                st.progress(cep_q / 100.0)
+            else:
+                st.write("**Qualidade de CEPs (Geolocalização):** Sem operações registradas")
+                st.progress(0.0)
+                
+            # Município
+            if row["total_operacoes_municipio"] > 0:
+                mun_q = max(0.0, 100.0 * (1.0 - (row["municipio_invalido"] / row["total_operacoes_municipio"])))
+                st.write(f"**Qualidade de Municípios (Cód IBGE):** {mun_q:.1f}%")
+                st.progress(mun_q / 100.0)
+            else:
+                st.write("**Qualidade de Municípios (Cód IBGE):** Sem operações registradas")
+                st.progress(0.0)
+                
+            # CPF/CNPJ
+            if row["total_operacoes_cpf_cnpj"] > 0:
+                doc_q = max(0.0, 100.0 * (1.0 - (row["cpf_cnpj_invalido"] / row["total_operacoes_cpf_cnpj"])))
+                st.write(f"**Qualidade de CPF/CNPJ (Contratado):** {doc_q:.1f}%")
+                st.progress(doc_q / 100.0)
+            else:
+                st.write("**Qualidade de CPF/CNPJ (Contratado):** Sem operações registradas")
+                st.progress(0.0)
         else:
             st.info("Métricas cadastrais indisponíveis.")
             
@@ -460,49 +539,47 @@ def render_overview_tab(conn, where_clause: str):
     
     # Seção 5: Sankey Diagram de Fluxo Operacional
     st.markdown("##### 🔀 Sankey Operacional: Rastreabilidade e Fluxo de Rejeições")
-    st.caption("Fluxo analítico: Funcionalidade ➔ Tipo Rejeição ➔ Causa Raiz ➔ Entidade Afetada (Top 5 + OUTROS).")
+    st.caption("Fluxo analítico simplificado: Funcionalidade ➔ Tipo Rejeição ➔ Causa Raiz.")
     
     df_sankey = conn.execute(f"""
         SELECT 
             p.funcionalidade,
-            r.tipo_rejeicao_semantica,
+            COALESCE(r.tipo_rejeicao_semantica, r.tipo_erro_tecnico, 'OUTROS_NAO_CATEGORIZADO') as tipo_rejeicao,
             r.causa_raiz,
-            COALESCE(e.entidade_valor, 'SEM ENTIDADE') as entidade_valor,
             COUNT(*) as volume
-        FROM fact_rejeicoes_semanticas r
-        JOIN dim_log p ON p.log_id = r.log_id
-        LEFT JOIN fact_entidades_extraidas e ON r.rejeicao_id = e.rejeicao_id
-        WHERE {where_clause}
-        GROUP BY 1, 2, 3, 4
-        ORDER BY volume DESC
-        LIMIT 100;
+        FROM dim_log p
+        JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
+        WHERE {where_clause} AND p.status_geral = 'ERRO' 
+          AND COALESCE(r.tipo_rejeicao_semantica, '') NOT IN ('SUCESSO_GERACAO', 'SUCESSO_INSERCAO', 'SUCESSO')
+        GROUP BY 1, 2, 3
+        ORDER BY volume DESC;
     """).df()
     
     if not df_sankey.empty:
-        # Agrupar entidades menores em "OUTROS"
-        entity_counts = df_sankey[df_sankey["entidade_valor"] != 'SEM ENTIDADE'].groupby("entidade_valor")["volume"].sum()
-        if not entity_counts.empty:
-            top_5_entities = entity_counts.nlargest(5).index
-            df_sankey["entidade_valor_grouped"] = df_sankey["entidade_valor"].apply(
-                lambda x: x if x in top_5_entities or x == 'SEM ENTIDADE' else 'OUTROS ENTIDADES'
-            )
-        else:
-            df_sankey["entidade_valor_grouped"] = 'SEM ENTIDADE'
-            
+        # Top 5 funcionalidades
+        top_funcs = df_sankey.groupby("funcionalidade")["volume"].sum().nlargest(5).index
+        # Top 7 rejections
+        top_rejs = df_sankey.groupby("tipo_rejeicao")["volume"].sum().nlargest(7).index
+        # Top 5 causes
+        top_causas = df_sankey.groupby("causa_raiz")["volume"].sum().nlargest(5).index
+        
+        df_sankey["func_grouped"] = df_sankey["funcionalidade"].apply(lambda x: x if x in top_funcs else "OUTROS")
+        df_sankey["rej_grouped"] = df_sankey["tipo_rejeicao"].apply(lambda x: x if x in top_rejs else "OUTROS")
+        df_sankey["causa_grouped"] = df_sankey["causa_raiz"].apply(lambda x: x if x in top_causas else "OUTROS")
+        
         df_sankey_clean = df_sankey.groupby(
-            ["funcionalidade", "tipo_rejeicao_semantica", "causa_raiz", "entidade_valor_grouped"]
+            ["func_grouped", "rej_grouped", "causa_grouped"]
         )["volume"].sum().reset_index()
         
         # Limita para visualização limpa
         df_sankey_clean = df_sankey_clean.nlargest(20, "volume")
         
         if not df_sankey_clean.empty:
-            nodes_func = [f"F: {x}" for x in df_sankey_clean["funcionalidade"].unique()]
-            nodes_rej = [f"R: {x}" for x in df_sankey_clean["tipo_rejeicao_semantica"].unique()]
-            nodes_causa = [f"C: {x}" for x in df_sankey_clean["causa_raiz"].unique()]
-            nodes_ent = [f"E: {x}" for x in df_sankey_clean["entidade_valor_grouped"].unique()]
+            nodes_func = [f"F: {x}" for x in df_sankey_clean["func_grouped"].unique()]
+            nodes_rej = [f"R: {x}" for x in df_sankey_clean["rej_grouped"].unique()]
+            nodes_causa = [f"C: {x}" for x in df_sankey_clean["causa_grouped"].unique()]
             
-            all_nodes = nodes_func + nodes_rej + nodes_causa + nodes_ent
+            all_nodes = nodes_func + nodes_rej + nodes_causa
             node_idx = {name: i for i, name in enumerate(all_nodes)}
             
             sources = []
@@ -510,24 +587,17 @@ def render_overview_tab(conn, where_clause: str):
             values = []
             
             # Link 1: Funcionalidade -> Tipo Rejeicao
-            df_link1 = df_sankey_clean.groupby(["funcionalidade", "tipo_rejeicao_semantica"])["volume"].sum().reset_index()
+            df_link1 = df_sankey_clean.groupby(["func_grouped", "rej_grouped"])["volume"].sum().reset_index()
             for _, row in df_link1.iterrows():
-                sources.append(node_idx[f"F: {row['funcionalidade']}"])
-                targets.append(node_idx[f"R: {row['tipo_rejeicao_semantica']}"])
+                sources.append(node_idx[f"F: {row['func_grouped']}"])
+                targets.append(node_idx[f"R: {row['rej_grouped']}"])
                 values.append(row["volume"])
                 
             # Link 2: Tipo Rejeicao -> Causa Raiz
-            df_link2 = df_sankey_clean.groupby(["tipo_rejeicao_semantica", "causa_raiz"])["volume"].sum().reset_index()
+            df_link2 = df_sankey_clean.groupby(["rej_grouped", "causa_grouped"])["volume"].sum().reset_index()
             for _, row in df_link2.iterrows():
-                sources.append(node_idx[f"R: {row['tipo_rejeicao_semantica']}"])
-                targets.append(node_idx[f"C: {row['causa_raiz']}"])
-                values.append(row["volume"])
-                
-            # Link 3: Causa Raiz -> Entidade
-            df_link3 = df_sankey_clean.groupby(["causa_raiz", "entidade_valor_grouped"])["volume"].sum().reset_index()
-            for _, row in df_link3.iterrows():
-                sources.append(node_idx[f"C: {row['causa_raiz']}"])
-                targets.append(node_idx[f"E: {row['entidade_valor_grouped']}"])
+                sources.append(node_idx[f"R: {row['rej_grouped']}"])
+                targets.append(node_idx[f"C: {row['causa_grouped']}"])
                 values.append(row["volume"])
                 
             fig_sankey = go.Figure(data=[go.Sankey(
@@ -558,10 +628,9 @@ def render_overview_tab(conn, where_clause: str):
     else:
         st.info("Fluxo Sankey indisponível.")
         
-    # Seção 5: Observabilidade Temporal (Apenas se houver variabilidade real)
+    # Seção 6: Observabilidade Temporal
     st.markdown("---")
     
-    # Verificar variabilidade temporal real
     distinct_days = conn.execute(f"""
         SELECT COUNT(DISTINCT date_trunc('day', p.data_evento))
         FROM dim_log p
@@ -595,7 +664,7 @@ def render_overview_tab(conn, where_clause: str):
                 COUNT(*) as total
             FROM fact_rejeicoes_semanticas r
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
+            WHERE {where_clause} AND p.status_geral = 'ERRO'
             GROUP BY 1, 2
             ORDER BY 1;
         """).df()
@@ -650,10 +719,10 @@ def render_errors_tab(conn, where_clause: str):
     # Severidades do cliente para o Score
     sev_client = conn.execute(f"""
         SELECT 
-            COUNT(CASE WHEN r.severidade = 'CRITICA' THEN 1 END) as count_critica,
-            COUNT(CASE WHEN r.severidade = 'ALTA' THEN 1 END) as count_alta,
-            COUNT(CASE WHEN r.severidade = 'MEDIA' THEN 1 END) as count_media,
-            COUNT(CASE WHEN r.severidade = 'BAIXA' THEN 1 END) as count_baixa
+            COUNT(CASE WHEN r.severidade = 'CRITICO' THEN 1 END) as count_critica,
+            COUNT(CASE WHEN r.severidade = 'ALTO' THEN 1 END) as count_alta,
+            COUNT(CASE WHEN r.severidade = 'MEDIO' THEN 1 END) as count_media,
+            COUNT(CASE WHEN r.severidade = 'BAIXO' THEN 1 END) as count_baixa
         FROM fact_rejeicoes_semanticas r
         JOIN dim_log p ON p.log_id = r.log_id
         WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}';
@@ -661,22 +730,32 @@ def render_errors_tab(conn, where_clause: str):
     
     c_critica, c_alta, c_media, c_baixa = sev_client
     penalties_client = (c_critica * 1.0) + (c_alta * 0.5) + (c_media * 0.2) + (c_baixa * 0.1)
-    score_client = max(0.0, 100.0 - (penalties_client / total_client) * 100.0)
+    score_client = max(0.0, 100.0 - (penalties_client / total_client) * 100.0) if total_client > 0 else 100.0
     
     rejeicoes_client = conn.execute(f"""
         SELECT COUNT(*)
         FROM fact_rejeicoes_semanticas r
         JOIN dim_log p ON p.log_id = r.log_id
-        WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}';
+        WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
+          AND r.resultado_operacional = 'REJEICAO_NEGOCIO';
     """).fetchone()[0]
     
-    # Qualidade Cadastral do Cliente
+    erros_tecnicos_client = conn.execute(f"""
+        SELECT COUNT(*)
+        FROM fact_rejeicoes_semanticas r
+        JOIN dim_log p ON p.log_id = r.log_id
+        WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
+          AND r.resultado_operacional IN ('ERRO_TECNICO', 'ERRO_INFRAESTRUTURA');
+    """).fetchone()[0]
+    
+    # Qualidade Cadastral do Cliente (rejeições de dados reais)
     cadastro_errors = conn.execute(f"""
         SELECT COUNT(*)
         FROM fact_rejeicoes_semanticas r
         JOIN dim_log p ON p.log_id = r.log_id
         WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
-          AND r.categoria_operacional IN ('TRANSPORTADOR', 'GEOLOCALIZACAO', 'PLACA');
+          AND r.categoria_operacional IN ('TRANSPORTADOR', 'GEOLOCALIZACAO', 'PLACA')
+          AND r.resultado_operacional = 'REJEICAO_NEGOCIO';
     """).fetchone()[0]
     perc_controlavel = (1.0 - (cadastro_errors / total_client)) * 100.0 if total_client > 0 else 100.0
     
@@ -716,10 +795,10 @@ def render_errors_tab(conn, where_clause: str):
         kcol1, kcol2 = st.columns(2)
         with kcol1:
             render_metric_card("Requisições do Cliente", f"{total_client:,}".replace(",", "."), None, "info")
-            render_metric_card("Total de Rejeições", f"{rejeicoes_client:,}".replace(",", "."), None, "down" if rejeicoes_client > 0 else "info")
+            render_metric_card("Rejeições (Negócio)", f"{rejeicoes_client:,}".replace(",", "."), None, "down" if rejeicoes_client > 0 else "info")
         with kcol2:
+            render_metric_card("Erros Técnicos/Infra", f"{erros_tecnicos_client:,}".replace(",", "."), None, "down" if erros_tecnicos_client > 0 else "info")
             render_metric_card("Qualidade Cadastral", f"{perc_controlavel:.1f}%", "Evitabilidade de erros", "up" if perc_controlavel > 80 else "down")
-            render_metric_card("Soma Penalidades", f"{penalties_client:.1f}", "Baseado em criticidade", "info")
             
     st.markdown("---")
     
@@ -738,6 +817,7 @@ def render_errors_tab(conn, where_clause: str):
             JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
             JOIN dim_log p ON p.log_id = r.log_id
             WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
+              AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY 1, 2
             ORDER BY 3 DESC
             LIMIT 8;
@@ -768,6 +848,7 @@ def render_errors_tab(conn, where_clause: str):
             FROM fact_rejeicoes_semanticas r
             JOIN dim_log p ON p.log_id = r.log_id
             WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
+              AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY 1
             ORDER BY 2 DESC;
         """).df()
@@ -812,6 +893,7 @@ def render_errors_tab(conn, where_clause: str):
         FROM fact_rejeicoes_semanticas r
         JOIN dim_log p ON p.log_id = r.log_id
         WHERE {where_clause} AND p.contratante = '{selected_client.replace("'", "''")}'
+          AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
         GROUP BY 1, 2, 3, 5
         ORDER BY 4 DESC;
     """).df()
@@ -849,7 +931,7 @@ def render_entity_table(conn, title, entity_type, where_clause, key_prefix):
             FROM fact_entidades_extraidas e
             JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause} AND {cond}
+            WHERE {where_clause} AND {cond} AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY 1
         ),
         entity_top_rejection AS (
@@ -860,7 +942,7 @@ def render_entity_table(conn, title, entity_type, where_clause, key_prefix):
             FROM fact_entidades_extraidas e
             JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause} AND {cond}
+            WHERE {where_clause} AND {cond} AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY e.entidade_valor, r.tipo_rejeicao_semantica
         ),
         entity_top_func AS (
@@ -871,7 +953,7 @@ def render_entity_table(conn, title, entity_type, where_clause, key_prefix):
             FROM fact_entidades_extraidas e
             JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause} AND {cond}
+            WHERE {where_clause} AND {cond} AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY e.entidade_valor, p.funcionalidade
         )
         SELECT 
@@ -975,7 +1057,7 @@ def render_entities_tab(conn, where_clause: str):
             FROM fact_entidades_extraidas e
             JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
             JOIN dim_log p ON p.log_id = r.log_id
-            WHERE {where_clause}
+            WHERE {where_clause} AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
             GROUP BY 1 ORDER BY 2 DESC LIMIT 5;
         """).df()
         
@@ -991,7 +1073,7 @@ def render_entities_tab(conn, where_clause: str):
                 FROM fact_entidades_extraidas e
                 JOIN fact_rejeicoes_semanticas r ON r.rejeicao_id = e.rejeicao_id
                 JOIN dim_log p ON p.log_id = r.log_id
-                WHERE {where_clause} AND e.entidade_valor IN ({list_str})
+                WHERE {where_clause} AND e.entidade_valor IN ({list_str}) AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
                 GROUP BY 1, 2 ORDER BY 1;
             """).df()
             
@@ -1027,7 +1109,7 @@ def render_observability_tab(conn, where_clause: str):
         SELECT p.contratante, r.tipo_rejeicao_semantica, COUNT(*) as total
         FROM fact_rejeicoes_semanticas r
         JOIN dim_log p ON p.log_id = r.log_id
-        WHERE {where_clause}
+        WHERE {where_clause} AND r.resultado_operacional = 'REJEICAO_NEGOCIO'
         GROUP BY 1, 2;
     """).df()
     
@@ -1146,7 +1228,7 @@ def render_logs_table_tab(conn, where_clause: str):
     local_conds = [where_clause]
     if search_text.strip():
         s_clean = search_text.replace("'", "''")
-        local_conds.append(f"(p.protocolo LIKE '%{s_clean}%' OR r.mensagem_original ILIKE '%{s_clean}%' OR e.entidade_valor LIKE '%{s_clean}%')")
+        local_conds.append(f"(p.protocolo LIKE '%{s_clean}%' OR r.mensagem_original ILIKE '%{s_clean}%' OR EXISTS (SELECT 1 FROM fact_entidades_extraidas e WHERE e.rejeicao_id = r.rejeicao_id AND e.entidade_valor LIKE '%{s_clean}%'))")
     if sel_func != "TODAS":
         sel_func_escaped = sel_func.replace("'", "''")
         local_conds.append(f"p.funcionalidade = '{sel_func_escaped}'")
@@ -1163,7 +1245,6 @@ def render_logs_table_tab(conn, where_clause: str):
         SELECT COUNT(*)
         FROM dim_log p
         LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-        LEFT JOIN fact_entidades_extraidas e ON r.rejeicao_id = e.rejeicao_id
         WHERE {combined_where};
     """).fetchone()[0]
     
@@ -1184,20 +1265,25 @@ def render_logs_table_tab(conn, where_clause: str):
             p.contratante as "contratante",
             p.funcionalidade as "funcionalidade",
             p.status_geral as "status_geral",
+            p.resultado_operacional as "resultado_operacional",
             r.codigo_antt as "codigo_antt",
             r.tipo_rejeicao_semantica as "tipo_rejeicao_semantica",
+            r.tipo_erro_tecnico as "tipo_erro_tecnico",
             r.causa_raiz as "causa_raiz",
             r.orientacao_operacional as "orientacao_operacional",
-            e.entidade_tipo as "entidade_tipo",
-            e.entidade_valor as "entidade_valor",
-            r.mensagem_original as "mensagem_original",
+            (
+                SELECT COALESCE(string_agg(e.entidade_tipo || ':' || e.entidade_valor, ' | '), '')
+                FROM fact_entidades_extraidas e
+                WHERE e.rejeicao_id = r.rejeicao_id
+            ) as "entidades_extraidas",
+            COALESCE(r.mensagem_original, 'Operação concluída com sucesso') as "mensagem_original",
             r.severidade as "severidade",
             r.categoria_operacional as "categoria",
             CASE 
-                WHEN r.severidade = 'CRITICA' THEN -1.0
-                WHEN r.severidade = 'ALTA' THEN -0.5
-                WHEN r.severidade = 'MEDIA' THEN -0.2
-                WHEN r.severidade = 'BAIXA' THEN -0.1
+                WHEN r.severidade = 'CRITICO' THEN -1.0
+                WHEN r.severidade = 'ALTO' THEN -0.5
+                WHEN r.severidade = 'MEDIO' THEN -0.2
+                WHEN r.severidade = 'BAIXO' THEN -0.1
                 ELSE 0.0
             END as "score",
             r.subtipo_rejeicao as "rejeicao_oficial",
@@ -1205,7 +1291,6 @@ def render_logs_table_tab(conn, where_clause: str):
             p.log_id as "hash_evento"
         FROM dim_log p
         LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
-        LEFT JOIN fact_entidades_extraidas e ON r.rejeicao_id = e.rejeicao_id
         WHERE {combined_where}
         ORDER BY p.data_evento DESC
         LIMIT {limit} OFFSET {offset};
@@ -1220,7 +1305,7 @@ def render_logs_table_tab(conn, where_clause: str):
         
     st.markdown("---")
     st.markdown("##### 📥 Exportar Dados Operacionais")
-    st.caption("A exportação analítica consolida os logs e erros associados em um arquivo denormalizado de 18 colunas.")
+    st.caption("A exportação analítica consolida os logs e erros associados em um arquivo denormalizado contendo todo o contexto operacional.")
     
     export_sql = f"""
         SELECT 
@@ -1229,25 +1314,29 @@ def render_logs_table_tab(conn, where_clause: str):
             p.contratante,
             p.funcionalidade,
             p.status_geral,
+            p.resultado_operacional,
+            r.tipo_rejeicao_semantica,
+            r.tipo_erro_tecnico,
+            COALESCE(r.mensagem_original, 'Operação concluída com sucesso') as mensagem_original,
+            COALESCE(r.mensagem_normalizada, 'Operação concluída com sucesso') as mensagem_normalizada,
+            CASE WHEN p.status_geral = 'SUCESSO' THEN 'SIM' ELSE 'NÃO' END as indicador_sucesso,
+            COALESCE(r.severidade, 'INFO') as severidade_operacional,
+            COALESCE(r.codigo_antt, '') as codigo_antt,
+            CASE WHEN p.resultado_operacional IN ('SUCESSO', 'SUCESSO_COM_ALERTA') THEN 'Sucesso Operacional' ELSE 'Erro/Falha' END as contexto_operacional,
             r.rejeicao_id,
             r.log_id,
-            r.codigo_antt,
-            r.mensagem_original,
-            r.mensagem_normalizada,
             r.template_oficial,
-            r.tipo_rejeicao_semantica,
             r.subtipo_rejeicao as mensagem_padrao,
             r.categoria_operacional as categoria_oficial,
             r.causa_raiz,
             r.orientacao_operacional,
-            r.severidade,
             (
                 SELECT COALESCE(string_agg(e.entidade_tipo || ':' || e.entidade_valor, ' | '), '')
                 FROM fact_entidades_extraidas e
                 WHERE e.rejeicao_id = r.rejeicao_id
             ) as entidades_extraidas
         FROM dim_log p
-        JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
+        LEFT JOIN fact_rejeicoes_semanticas r ON p.log_id = r.log_id
         WHERE {where_clause}
         ORDER BY p.data_evento DESC
     """
@@ -1281,3 +1370,156 @@ def render_logs_table_tab(conn, where_clause: str):
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="dl_xlsx_" + filter_key_suffix
             )
+
+def render_normalized_rejections_tab(conn, where_clause: str):
+    """Renderiza a aba 'Rejeições Normalizadas Consolidadas' com busca, paginação e exportação."""
+    import io
+    st.markdown("### 🔍 Rejeições Normalizadas Consolidadas")
+    st.caption("Consolidação operacional de todas as ocorrências de rejeições ANTT utilizando exclusivamente a mensagem normalizada.")
+    
+    # 1. Filtro de Busca Textual Local
+    search_text = st.text_input("🔍 Buscar na Funcionalidade / Mensagem Normalizada:", "", key="consolidated_search_text")
+    
+    # Construção da query SQL baseada em CTE
+    search_cond = ""
+    if search_text.strip():
+        s_clean = search_text.replace("'", "''")
+        search_cond = f"WHERE mensagem_normalizada ILIKE '%{s_clean}%' OR funcionalidade ILIKE '%{s_clean}%'"
+        
+    query = f"""
+        WITH cohort_errors AS (
+            SELECT
+                p.funcionalidade,
+                COALESCE(NULLIF(r.mensagem_normalizada, ''), 'Erro de sistema ou resposta vazia') AS mensagem_normalizada,
+                COUNT(*) AS quantidade,
+                ROUND(
+                    COUNT(*) * 100.0 /
+                    SUM(COUNT(*)) OVER (),
+                    3
+                ) AS percentual_representatividade
+            FROM fact_rejeicoes_semanticas r
+            JOIN dim_log p ON p.log_id = r.log_id
+            WHERE p.status_geral = 'ERRO' AND {where_clause}
+            GROUP BY 1, 2
+        )
+        SELECT 
+            funcionalidade,
+            mensagem_normalizada,
+            quantidade,
+            percentual_representatividade AS "% representatividade"
+        FROM cohort_errors
+        {search_cond}
+        ORDER BY quantidade DESC;
+    """
+    
+    df = conn.execute(query).df()
+    
+    if df.empty:
+        st.info("Nenhuma rejeição consolidada encontrada para os filtros selecionados.")
+        return
+        
+    total_rows = len(df)
+    total_quantidade = df["quantidade"].sum()
+    
+    # KPIs rápidos
+    col_m1, col_m2 = st.columns(2)
+    with col_m1:
+        st.metric("Total de Ocorrências (ERRO)", f"{total_quantidade:,}".replace(",", "."), help="Soma total das ocorrências nesta visão.")
+    with col_m2:
+        st.metric("Tipos Únicos de Rejeição", f"{total_rows}", help="Quantidade de mensagens normalizadas distintas por funcionalidade.")
+        
+    st.markdown("---")
+    
+    # 2. Controles de Paginação
+    limit = 15
+    total_pages = max(1, (total_rows + limit - 1) // limit)
+    
+    col_pag1, col_pag2, col_pag3 = st.columns([2, 1, 2])
+    with col_pag2:
+        if total_pages > 1:
+            page = st.number_input("Página", min_value=1, max_value=total_pages, value=1, step=1, key="consolidated_rejections_page")
+        else:
+            page = 1
+        offset = (page - 1) * limit
+        
+    # Fatiamento dos dados da página atual
+    df_page = df.iloc[offset : offset + limit]
+    
+    # Exibe a tabela formatada com colunas customizadas
+    st.dataframe(
+        df_page,
+        column_config={
+            "funcionalidade": st.column_config.TextColumn(
+                "funcionalidade",
+                width="medium",
+                help="Funcionalidade/endpoint operacional ANTT"
+            ),
+            "mensagem_normalizada": st.column_config.TextColumn(
+                "mensagem_normalizada",
+                width="large",
+                help="Mensagem de erro normalizada com placeholders preservados"
+            ),
+            "quantidade": st.column_config.NumberColumn(
+                "quantidade",
+                format="%d",
+                help="Quantidade absoluta de ocorrências"
+            ),
+            "% representatividade": st.column_config.NumberColumn(
+                "% representatividade",
+                format="%.3f%%",
+                help="Percentual de representação sobre o total de erros"
+            )
+        },
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    # 3. Rodapé com totalizador similar ao da planilha do usuário
+    st.markdown(
+        f"""
+        <div style="background-color: rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 5px; margin-top: -10px; display: flex; justify-content: space-between; font-weight: bold; border: 1px solid rgba(255, 255, 255, 0.1);">
+            <div style="flex: 2; padding-left: 10px;">Total</div>
+            <div style="flex: 3; text-align: left;"></div>
+            <div style="flex: 1; text-align: left; padding-left: 10px;">{total_quantidade:,}</div>
+            <div style="flex: 1; text-align: left; padding-left: 10px;">100,000%</div>
+        </div>
+        """.replace(",", "."),
+        unsafe_allow_html=True
+    )
+    
+    st.markdown("---")
+    
+    # 4. Ações de Exportação
+    st.markdown("##### 📥 Exportar Rejeições Consoladas")
+    st.caption("Faça o download do relatório consolidado com os filtros e busca aplicados.")
+    
+    col_exp1, col_exp2 = st.columns(2)
+    filter_key_suffix = str(hash(where_clause) ^ hash(search_text))
+    
+    # Exportação em CSV
+    csv_buffer = io.BytesIO()
+    df.to_csv(csv_buffer, sep=";", index=False, encoding="utf-8")
+    csv_data = csv_buffer.getvalue()
+    
+    # Exportação em Excel usando Polars para formatação rápida
+    xlsx_buffer = io.BytesIO()
+    pl.from_pandas(df).write_excel(xlsx_buffer, table_name="Rejeicoes_Normalizadas", table_style="Table Style Medium 9")
+    xlsx_data = xlsx_buffer.getvalue()
+    
+    with col_exp1:
+        st.download_button(
+            label="📥 Exportar para CSV",
+            data=csv_data,
+            file_name=f"rejeicoes_normalizadas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            key="dl_csv_norm_" + filter_key_suffix
+        )
+    with col_exp2:
+        st.download_button(
+            label="📥 Exportar para Excel (XLSX)",
+            data=xlsx_data,
+            file_name=f"rejeicoes_normalizadas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="dl_xlsx_norm_" + filter_key_suffix
+        )
+

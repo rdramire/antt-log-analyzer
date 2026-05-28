@@ -35,7 +35,7 @@ def read_uploaded_file(file_path: str) -> pl.DataFrame:
                         file_path, 
                         separator=delimiter, 
                         encoding=encoding,
-                        infer_schema_length=10000,
+                        infer_schema_length=None,
                         ignore_errors=True
                     )
                     df = normalize_columns(df)

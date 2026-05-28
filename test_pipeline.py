@@ -133,7 +133,7 @@ def run_validation():
     # 5. Verifica fact_rejeicoes_semanticas
     print("\n--- Verificação de fact_rejeicoes_semanticas ---")
     df_rejs = conn.execute("""
-        SELECT r.rejeicao_id, p.protocolo, r.categoria_operacional, r.tipo_rejeicao_semantica, r.subtipo_rejeicao, r.severidade, r.orientacao_operacional, r.mensagem, r.mensagem_original, r.mensagem_normalizada, r.template_oficial
+        SELECT r.rejeicao_id, p.protocolo, r.categoria_operacional, r.tipo_rejeicao_semantica, r.subtipo_rejeicao, r.severidade, r.orientacao_operacional, r.mensagem, r.mensagem_original, r.mensagem_normalizada, r.template_oficial, r.resultado_operacional, r.tipo_erro_tecnico
         FROM fact_rejeicoes_semanticas r 
         JOIN dim_log p ON p.log_id = r.log_id
     """).df()
@@ -204,6 +204,9 @@ def run_validation():
     assert "mensagem_original" in df_rejs.columns, "Erro: coluna mensagem_original ausente!"
     assert "mensagem_normalizada" in df_rejs.columns, "Erro: coluna mensagem_normalizada ausente!"
     assert "template_oficial" in df_rejs.columns, "Erro: coluna template_oficial ausente!"
+    assert "resultado_operacional" in df_logs.columns, "Erro: coluna resultado_operacional ausente em dim_log!"
+    assert "resultado_operacional" in df_rejs.columns, "Erro: coluna resultado_operacional ausente em fact_rejeicoes_semanticas!"
+    assert "tipo_erro_tecnico" in df_rejs.columns, "Erro: coluna tipo_erro_tecnico ausente em fact_rejeicoes_semanticas!"
     
     # Valida normalização
     norm_val = df_rejs[df_rejs["tipo_rejeicao_semantica"] == "PLACA_SEM_VINCULO_RNTRC"].iloc[0]["mensagem_normalizada"]

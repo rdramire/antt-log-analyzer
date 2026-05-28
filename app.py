@@ -11,7 +11,8 @@ from ui.dashboard import (
     render_errors_tab,
     render_entities_tab,
     render_logs_table_tab,
-    render_observability_tab
+    render_observability_tab,
+    render_normalized_rejections_tab
 )
 from utils.telemetry import Timer
 
@@ -54,23 +55,76 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # Calcula hash MD5 direto na memória
-    file_bytes = uploaded_file.getvalue()
-    file_hash = hashlib.md5(file_bytes).hexdigest()
+    file_size_bytes = uploaded_file.size
+    file_size_mb = file_size_bytes / (1024 * 1024)
     
-    # Salva o arquivo na pasta uploads/ para a camada RAW se ainda não existir
-    file_name_clean = "".join([c if c.isalnum() or c in [".", "_", "-"] else "_" for c in uploaded_file.name])
-    temp_file_path = os.path.join("uploads", f"{file_hash}_{file_name_clean}")
-    
-    if not os.path.exists(temp_file_path):
-        with open(temp_file_path, "wb") as f:
-            f.write(file_bytes)
+    # Alerta visual para arquivos grandes
+    if file_size_mb > 50:
+        st.warning(f"⚠️ Arquivo grande detectado ({file_size_mb:.1f} MB). O processamento pode levar alguns minutos.")
+        
+    # Inicializa painel visual de progresso (sensação de processamento enterprise)
+    progress_container = st.container()
+    with progress_container:
+        st.markdown("### ⚙️ Processamento e Ingestão do Arquivo")
+        progress_bar = st.progress(0.0)
+        status_text = st.empty()
+        details_text = st.empty()
+        
+    def update_ui_progress(percent, msg, details=""):
+        progress_bar.progress(percent)
+        status_text.markdown(f"**Etapa:** {msg}")
+        if details:
+            details_text.text(details)
+        else:
+            details_text.empty()
             
-    # Executa o Pipeline ETL com Medição de Tempo
-    with Timer("ETL Pipeline Completo", {"filename": uploaded_file.name, "hash": file_hash}):
-        with st.spinner("Processando e Normalizando logs com Polars (Alta Performance)..."):
+    # Executa o upload e hashing incremental
+    update_ui_progress(0.01, "Upload realizado. Iniciando gravação do arquivo...", "Inicializando streaming para o disco...")
+    
+    file_name_clean = "".join([c if c.isalnum() or c in [".", "_", "-"] else "_" for c in uploaded_file.name])
+    temp_raw_path = os.path.join("uploads", f"temp_raw_{file_name_clean}")
+    
+    try:
+        hash_md5 = hashlib.md5()
+        chunk_size = 10 * 1024 * 1024  # 10MB chunks
+        uploaded_file.seek(0)
+        
+        total_chunks = max(1, int(file_size_bytes / chunk_size))
+        chunks_written = 0
+        
+        with open(temp_raw_path, "wb") as f:
+            while True:
+                chunk = uploaded_file.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                hash_md5.update(chunk)
+                chunks_written += 1
+                prog = min(0.09, 0.01 + 0.08 * (chunks_written / total_chunks))
+                update_ui_progress(prog, "Gravando arquivo temporário em disco...", f"Escritos {chunks_written * 10}MB / {file_size_mb:.1f}MB")
+                
+        file_hash = hash_md5.hexdigest()
+        temp_file_path = os.path.join("uploads", f"{file_hash}_{file_name_clean}")
+        
+        if os.path.exists(temp_file_path):
             try:
-                stats = run_etl_pipeline(temp_file_path, file_hash, conn)
+                os.remove(temp_raw_path)
+            except Exception:
+                pass
+        else:
+            os.rename(temp_raw_path, temp_file_path)
+            
+        update_ui_progress(0.10, "Arquivo salvo e hash MD5 gerado com sucesso!")
+        
+        # Executa o Pipeline ETL com Medição de Tempo
+        with Timer("ETL Pipeline Completo", {"filename": uploaded_file.name, "hash": file_hash}):
+            try:
+                stats = run_etl_pipeline(
+                    temp_file_path, 
+                    file_hash, 
+                    conn, 
+                    progress_callback=lambda p, m, d="": update_ui_progress(0.10 + p * 0.90, m, d)
+                )
                 
                 # Armazena estado na session_state para sabermos qual hash está carregado
                 st.session_state["loaded_file_hash"] = file_hash
@@ -83,10 +137,20 @@ if uploaded_file is not None:
                     st.session_state["last_hash"] = file_hash
                     if "filter_options" in st.session_state:
                         del st.session_state["filter_options"]
-                        
+                
+                # Limpa container de progresso após finalização com sucesso
+                progress_container.empty()
+                
             except Exception as e:
+                # Limpa container em caso de falha e mostra erro
+                progress_container.empty()
                 st.error(f"Erro fatal no processamento do arquivo: {str(e)}")
                 st.session_state["loaded_file_hash"] = None
+                
+    except Exception as e:
+        progress_container.empty()
+        st.error(f"Erro ao salvar arquivo no disco: {str(e)}")
+        st.session_state["loaded_file_hash"] = None
 
     # Exibe informações do arquivo carregado se o processamento foi bem-sucedido
     if st.session_state.get("loaded_file_hash") == file_hash:
@@ -101,8 +165,9 @@ if uploaded_file is not None:
         where_clause = render_filters(conn)
         
         # 4. Navegação por Abas Principais
-        tab_overview, tab_errors, tab_entities, tab_observability, tab_table = st.tabs([
+        tab_overview, tab_consolidated, tab_errors, tab_entities, tab_observability, tab_table = st.tabs([
             "📈 Visão Geral", 
+            "🎯 Rejeições Consolidadas",
             "🏢 Diagnóstico por Contratante", 
             "⚠️ Entidades Críticas",
             "🛠️ Observabilidade & Correlação",
@@ -111,6 +176,9 @@ if uploaded_file is not None:
         
         with tab_overview:
             render_overview_tab(conn, where_clause)
+            
+        with tab_consolidated:
+            render_normalized_rejections_tab(conn, where_clause)
             
         with tab_errors:
             render_errors_tab(conn, where_clause)
