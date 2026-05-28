@@ -24,6 +24,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Controle de Acesso por Senha (Executado antes de qualquer outra lógica de negócio/banco)
+from auth import check_authentication
+if not check_authentication():
+    st.stop()
+
 # Inicializa diretórios do sistema
 init_directories()
 
@@ -33,13 +38,19 @@ inject_theme_styles()
 # Conecta ao banco de dados DuckDB
 conn = get_db_connection()
 
-# Painel de Administração - Limpar Memória
+# Painel de Administração e Sessão
 with st.sidebar:
     st.markdown("### ⚙️ Administração")
     if st.button("🧹 Limpar Memória / Resetar", help="Deleta todos os arquivos temporários, logs carregados e limpa o cache da aplicação."):
         clear_all_memory(conn)
         st.success("Memória limpa! Recarregando...")
         st.rerun()
+        
+    st.markdown("---")
+    if st.button("🚪 Sair / Logout", help="Efetua o logout e encerra a sessão ativa do usuário."):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
 
 # Cabeçalho da aplicação
 render_header(
