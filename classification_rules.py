@@ -213,6 +213,18 @@ OFFICIAL_CLASSIFICATION_RULES = [
             r"(?i)comunica[cç]ao.*api",
             r"(?i)erro.*comunica[cç]ao"
         ]
+    },
+    {
+        "codigo": None,
+        "categoria": "INTEGRACAO",
+        "template_oficial": "ERRO_SERIALIZACAO_OBJETO",
+        "descricao_oficial": "Erro de serialização de objeto Java retornado pela API",
+        "causa_raiz": "FALHA_SERIALIZACAO_RESPONSE",
+        "orientacao_operacional": "Validar serialização do objeto retornado pela API e estrutura do response da integração.",
+        "severidade": "CRITICA",
+        "patterns": [
+            r"br\.com\.[\w\.]+\@[a-fA-F0-9]+"
+        ]
     }
 ]
 
@@ -231,6 +243,7 @@ OFFICIAL_GUIDANCE_MAP = {
     "JANELA OPERACIONAL": "Reduzir o intervalo entre a data de início e fim da viagem para menos de 90 dias.",
     "TOLERÂNCIA": "Ajustar a data de declaração dentro do limite de tolerância permitido.",
     "INTEGRAÇÃO": "Falha temporária de comunicação com o sistema RNTRC/ANTT. Reenviar após alguns instantes.",
+    "INTEGRACAO": "Validar serialização do objeto retornado pela API e estrutura do response da integração.",
     "SISTEMA": "Erro de sistema interno. Contatar suporte técnico.",
     "NOVO_CODIGO_NAO_CLASSIFICADO": "Nova rejeição não classificada. Necessita revisão manual.",
     "OUTROS_NAO_CATEGORIZADO": "Nova rejeição não classificada. Necessita revisão manual."
@@ -251,6 +264,7 @@ SEVERIDADE_CATEGORIA_MAP = {
     "JANELA OPERACIONAL": "MEDIA",
     "TOLERÂNCIA": "MEDIA",
     "INTEGRAÇÃO": "CRITICA",
+    "INTEGRACAO": "CRITICA",
     "SISTEMA": "CRITICA",
     "NOVO_CODIGO_NAO_CLASSIFICADO": "MEDIA",
     "OUTROS_NAO_CATEGORIZADO": "MEDIA"
@@ -267,6 +281,10 @@ def normalize_message_placeholders(message: str) -> str:
         return ""
         
     msg = message
+    
+    # Substitui referências a objetos Java (ex: br.com.roadcard.antt.frete.model.EncerramentoOperacaoTransporte@1c25df32)
+    msg = re.sub(r"\b(br\.com\.[\w\.]+)\@[a-fA-F0-9]+\b", r"\1@{HEX}", msg)
+    msg = re.sub(r"\b([\w\.]+)\@[a-fA-F0-9]{6,}\b", r"\1@{HEX}", msg)
     
     # 0. Padroniza o prefixo/rótulo "Rejeição: " (sempre seguido por ":")
     msg = re.sub(r"(?i)^rejei[cç][aã]o\b\s*[-:]?\s*", "Rejeição: ", msg)

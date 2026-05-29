@@ -84,10 +84,10 @@ def classify_message_semantically(message: str, code_antt: str) -> dict:
                 return {
                     "categoria_operacional": rule["categoria"],
                     "tipo_rejeicao_semantica": rule["template_oficial"],
-                    "subtipo_rejeicao": rule["descricao_oficial"],
-                    "severidade": get_severity_for_category(rule["categoria"]),
-                    "orientacao_operacional": get_guidance_for_category(rule["categoria"]),
-                    "causa_raiz": rule["categoria"],
+                    "subtipo_rejeicao": rule.get("descricao_oficial", ""),
+                    "severidade": rule.get("severidade") or get_severity_for_category(rule["categoria"]),
+                    "orientacao_operacional": rule.get("orientacao_operacional") or get_guidance_for_category(rule["categoria"]),
+                    "causa_raiz": rule.get("causa_raiz") or rule["categoria"],
                     "codigo_oficial": rule["codigo"],
                     "template_oficial": rule["template_oficial"],
                     "mensagem_normalizada": norm_msg
@@ -110,10 +110,10 @@ def classify_message_semantically(message: str, code_antt: str) -> dict:
             return {
                 "categoria_operacional": rule["categoria"],
                 "tipo_rejeicao_semantica": rule["template_oficial"],
-                "subtipo_rejeicao": rule["descricao_oficial"],
-                "severidade": get_severity_for_category(rule["categoria"]),
-                "orientacao_operacional": get_guidance_for_category(rule["categoria"]),
-                "causa_raiz": rule["categoria"],
+                "subtipo_rejeicao": rule.get("descricao_oficial", ""),
+                "severidade": rule.get("severidade") or get_severity_for_category(rule["categoria"]),
+                "orientacao_operacional": rule.get("orientacao_operacional") or get_guidance_for_category(rule["categoria"]),
+                "causa_raiz": rule.get("causa_raiz") or rule["categoria"],
                 "codigo_oficial": rule["codigo"],
                 "template_oficial": rule["template_oficial"],
                 "mensagem_normalizada": norm_msg
@@ -346,7 +346,7 @@ def classify_log_message(message: str, code: str, functionality: str) -> dict:
         return {"resultado_operacional": "ERRO_TECNICO", "tipo_erro_tecnico": "AUTH", "severidade": "CRITICO"}
         
     # Parse / Serialização
-    if any(p in msg_lower for p in ["json", "xml", "parser", "parsing", "mapeamento", "deserializ", "serializ", "malformado"]):
+    if any(p in msg_lower for p in ["json", "xml", "parser", "parsing", "mapeamento", "deserializ", "serializ", "malformado"]) or re.search(r"br\.com\.[\w\.]+\@[a-fA-F0-9]+", msg_clean):
         return {"resultado_operacional": "ERRO_TECNICO", "tipo_erro_tecnico": "PARSE", "severidade": "CRITICO"}
         
     # SOAP Fault
@@ -360,7 +360,7 @@ def classify_log_message(message: str, code: str, functionality: str) -> dict:
     # D. Check if semantic category is system/integration
     sem = classify_message_semantically(message, code)
     cat = sem.get("categoria_operacional", "OUTROS_NAO_CATEGORIZADO")
-    if cat in ["INTEGRAÇÃO", "SISTEMA"]:
+    if cat in ["INTEGRAÇÃO", "INTEGRACAO", "SISTEMA"]:
         return {
             "resultado_operacional": "ERRO_TECNICO" if cat == "SISTEMA" else "ERRO_INFRAESTRUTURA",
             "tipo_erro_tecnico": "HTTP_500" if code_str == "500" else "CONEXAO",
@@ -758,27 +758,47 @@ def run_etl_pipeline(file_path: str, file_hash: str, conn, progress_callback=Non
                     
                 sem = classify_message_semantically(msg, code)
                 
-                # Se for erro técnico/infra, tipo_rejeicao_semantica deve ser null
+                # Se for erro técnico/infra, tipo_rejeicao_semantica deve ser null,
+                # a menos que tenhamos mapeado uma regra semântica de erro técnico específica
+                is_custom_tech_error = sem["template_oficial"] != "OUTROS_NAO_CATEGORIZADO"
+                
                 tipo_rej_sem = sem["tipo_rejeicao_semantica"]
-                if op_res["resultado_operacional"] in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"]:
+                if op_res["resultado_operacional"] in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] and not is_custom_tech_error:
                     tipo_rej_sem = None
                     
                 rej_id = f"{log_id}_rej_{i}"
+                
+                # Preserva metadados estruturados caso seja um erro técnico customizado
+                if op_res["resultado_operacional"] in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] and not is_custom_tech_error:
+                    categoria_op = "INTEGRAÇÃO"
+                    subtipo_rej = f"Erro técnico: {op_res['tipo_erro_tecnico']}"
+                    categoria = "INTEGRAÇÃO"
+                    causa_raiz = "INTEGRAÇÃO"
+                    orientacao_op = f"Erro técnico detectado ({op_res['tipo_erro_tecnico']}). Contatar suporte."
+                    temp_oficial = None
+                else:
+                    categoria_op = sem["categoria_operacional"]
+                    subtipo_rej = sem["subtipo_rejeicao"]
+                    categoria = sem["categoria_operacional"]
+                    causa_raiz = sem["causa_raiz"]
+                    orientacao_op = sem["orientacao_operacional"]
+                    temp_oficial = sem["template_oficial"]
+
                 rejections_records.append({
                     "rejeicao_id": rej_id,
                     "log_id": log_id,
                     "codigo_antt": code,
-                    "categoria_operacional": sem["categoria_operacional"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else "INTEGRAÇÃO",
+                    "categoria_operacional": categoria_op,
                     "tipo_rejeicao_semantica": tipo_rej_sem,
-                    "subtipo_rejeicao": sem["subtipo_rejeicao"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else f"Erro técnico: {op_res['tipo_erro_tecnico']}",
-                    "categoria": sem["categoria_operacional"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else "INTEGRAÇÃO",
+                    "subtipo_rejeicao": subtipo_rej,
+                    "categoria": categoria,
                     "severidade": op_res["severidade"],
-                    "causa_raiz": sem["categoria_operacional"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else "INTEGRAÇÃO",
-                    "orientacao_operacional": sem["orientacao_operacional"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else f"Erro técnico detectado ({op_res['tipo_erro_tecnico']}). Contatar suporte.",
+                    "causa_raiz": causa_raiz,
+                    "orientacao_operacional": orientacao_op,
                     "mensagem": msg,
                     "mensagem_original": msg,
                     "mensagem_normalizada": sem["mensagem_normalizada"],
-                    "template_oficial": sem["template_oficial"] if op_res["resultado_operacional"] not in ["ERRO_TECNICO", "ERRO_INFRAESTRUTURA"] else None,
+                    "template_oficial": temp_oficial,
                     "resultado_operacional": op_res["resultado_operacional"],
                     "tipo_erro_tecnico": op_res["tipo_erro_tecnico"]
                 })

@@ -404,7 +404,7 @@ def render_overview_tab(conn, where_clause: str):
                 CASE 
                     WHEN r.categoria_operacional IN ('PLACA', 'LOCALIZAÇÃO', 'CARGA', 'VALIDAÇÃO', 'DATA', 'JANELA OPERACIONAL', 'TOLERÂNCIA') THEN 'Evitável (Dados/Cadastro)'
                     WHEN r.categoria_operacional IN ('TRANSPORTADOR', 'PAGAMENTO', 'CIOT') THEN 'Parcialmente Evitável (Processo)'
-                    WHEN r.categoria_operacional IN ('INTEGRAÇÃO', 'SISTEMA') THEN 'Não Evitável (Integração/Sistema)'
+                    WHEN r.categoria_operacional IN ('INTEGRAÇÃO', 'INTEGRACAO', 'SISTEMA') THEN 'Não Evitável (Integração/Sistema)'
                     ELSE 'Não Classificado'
                 END as classe_evitabilidade,
                 COUNT(*) as total

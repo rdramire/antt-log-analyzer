@@ -98,6 +98,24 @@ def generate_mock_data():
             "funcionalidade": "Emitir CIOT",
             "cod_mensagem": "217",
             "des_resposta": "Rejeição: O(s) veículo(s) de placas AAA1234, BBB5678 está(ão) contratado(s) para outro contratante."
+        },
+        # Cenário 11: Erro de objeto Java não serializado (Hex 1c25df32)
+        {
+            "protocolo": "PROT011",
+            "data": "2026-05-26 12:30:00",
+            "contratante": "12.345.678/0001-00",
+            "funcionalidade": "Encerrar CIOT",
+            "cod_mensagem": "500",
+            "des_resposta": "br.com.roadcard.antt.frete.model.EncerramentoOperacaoTransporte@1c25df32"
+        },
+        # Cenário 12: Erro de objeto Java não serializado (Hex 2d3f4e5a - endereço de memória diferente)
+        {
+            "protocolo": "PROT012",
+            "data": "2026-05-26 12:45:00",
+            "contratante": "12.345.678/0001-00",
+            "funcionalidade": "Encerrar CIOT",
+            "cod_mensagem": "500",
+            "des_resposta": "br.com.roadcard.antt.frete.model.EncerramentoOperacaoTransporte@2d3f4e5a"
         }
     ]
     
@@ -113,7 +131,7 @@ def run_validation():
     
     # 1. Gera dados mock
     file_path = generate_mock_data()
-    file_hash = "mock_hash_test_semantic_official_130"
+    file_hash = "mock_hash_test_semantic_official_132"
     
     # 2. Conecta ao DuckDB em memória
     conn = duckdb.connect()
