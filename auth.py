@@ -59,11 +59,11 @@ def check_authentication():
                     st.error("⚠️ Erro de Configuração: O segredo 'APP_PASSWORD' não foi localizado nas configurações (secrets) do Streamlit.")
                     return False
                 
-                if password == correct_password:
+                if password.strip() == correct_password.strip():
                     st.session_state["authenticated"] = True
                     st.success("✅ Autenticado com sucesso! Carregando painel...")
                     st.rerun()
                 else:
-                    st.error("❌ Senha incorreta. Verifique suas credenciais e tente novamente.")
+                    st.error("❌ Senha incorreta. Verifique suas credenciais (por exemplo, espaços em branco ou maiúsculas/minúsculas) e tente novamente.")
                     
     return False
