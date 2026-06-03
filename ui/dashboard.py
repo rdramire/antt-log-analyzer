@@ -1420,6 +1420,10 @@ def render_normalized_rejections_tab(conn, where_clause: str):
         st.info("Nenhuma rejeição consolidada encontrada para os filtros selecionados.")
         return
         
+    # Converte a coluna de data para string formatada DD/MM/YYYY para exibição robusta e evitar incompatibilidades no frontend
+    if "data" in df.columns:
+        df["data"] = pd.to_datetime(df["data"]).dt.strftime("%d/%m/%Y")
+        
     total_rows = len(df)
     total_quantidade = df["quantidade"].sum()
     
@@ -1451,9 +1455,9 @@ def render_normalized_rejections_tab(conn, where_clause: str):
     st.dataframe(
         df_page,
         column_config={
-            "data": st.column_config.DateColumn(
+            "data": st.column_config.TextColumn(
                 "data",
-                format="DD/MM/YYYY",
+                width="small",
                 help="Data em que ocorreu a rejeição"
             ),
             "funcionalidade": st.column_config.TextColumn(
