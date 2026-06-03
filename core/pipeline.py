@@ -642,8 +642,15 @@ def run_etl_pipeline(file_path: str, file_hash: str, conn, progress_callback=Non
     else:
         col_exprs.append("'SEM_PROTOCOLO' AS cod_protocolo")
         
-    if "data" in temp_cols:
-        col_exprs.append("CAST(data AS VARCHAR) AS data")
+    # Mapeamento robusto para tratar variações do nome da coluna de data
+    date_col = None
+    for possible_name in ["data", "dhr_registro", "dhr_evento", "dh_registro", "data_evento", "data_registro", "data_hora", "timestamp", "created_at"]:
+        if possible_name in temp_cols:
+            date_col = possible_name
+            break
+            
+    if date_col:
+        col_exprs.append(f'CAST("{date_col}" AS VARCHAR) AS data')
     else:
         col_exprs.append("NULL AS data")
         
@@ -669,21 +676,40 @@ def run_etl_pipeline(file_path: str, file_hash: str, conn, progress_callback=Non
             pl.col("des_resposta").fill_null(""),
         ])
         
-        # Parser da Data
-        if "data" in chunk_df.columns and chunk_df["data"].null_count() < chunk_df.height:
-            parsed_date = None
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%d/%m/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%Y %H:%M"]:
-                try:
-                    test_col = chunk_df.select(pl.col("data").str.to_datetime(fmt, strict=False))
-                    if test_col["data"].null_count() < chunk_df.height:
-                        parsed_date = pl.col("data").str.to_datetime(fmt, strict=False)
-                        break
-                except Exception:
-                    continue
-            if parsed_date is not None:
-                chunk_df = chunk_df.with_columns(parsed_date.fill_null(datetime.now()))
+        # Parser da Data (Suporta tipos nativos de data e múltiplos formatos de string como d/m/Y)
+        if "data" in chunk_df.columns:
+            col_type = chunk_df["data"].dtype
+            if col_type in [pl.Date, pl.Datetime]:
+                chunk_df = chunk_df.with_columns(pl.col("data").cast(pl.Datetime).fill_null(datetime.now()))
             else:
-                chunk_df = chunk_df.with_columns(pl.lit(datetime.now()).alias("data"))
+                chunk_df = chunk_df.with_columns(pl.col("data").cast(pl.String))
+                if chunk_df["data"].null_count() < chunk_df.height:
+                    parsed_date = None
+                    formats_to_try = [
+                        "%d/%m/%Y %H:%M:%S",
+                        "%Y-%m-%d %H:%M:%S",
+                        "%d/%m/%Y %H:%M",
+                        "%Y-%m-%dT%H:%M:%S",
+                        "%d/%m/%Y",
+                        "%Y-%m-%d",
+                        "%d/%m/%y %H:%M:%S",
+                        "%d/%m/%y %H:%M",
+                        "%d/%m/%y",
+                    ]
+                    for fmt in formats_to_try:
+                        try:
+                            test_col = chunk_df.select(pl.col("data").str.to_datetime(fmt, strict=False))
+                            if test_col["data"].null_count() < chunk_df.height:
+                                parsed_date = pl.col("data").str.to_datetime(fmt, strict=False)
+                                break
+                        except Exception:
+                            continue
+                    if parsed_date is not None:
+                        chunk_df = chunk_df.with_columns(parsed_date.fill_null(datetime.now()))
+                    else:
+                        chunk_df = chunk_df.with_columns(pl.lit(datetime.now()).alias("data"))
+                else:
+                    chunk_df = chunk_df.with_columns(pl.lit(datetime.now()).alias("data"))
         else:
             chunk_df = chunk_df.with_columns(pl.lit(datetime.now()).alias("data"))
             

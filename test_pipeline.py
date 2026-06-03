@@ -12,16 +12,16 @@ def generate_mock_data():
         # Cenário 1: 1 código, 1 mensagem (JSON) -> Placa sem vínculo
         {
             "protocolo": "PROT001",
-            "data": "2026-05-26 10:00:00",
+            "dhr_registro": "2026-05-26 10:00:00",
             "contratante": "12.345.678/0001-00",
             "funcionalidade": "Emitir CIOT",
             "cod_mensagem": '{"Codigo":"217"}',
             "des_resposta": '{"Codigo":"217", "Mensagem":"A placa AAA-1234 não pertence ao RNTRC 12345678."}'
         },
-        # Cenário 2: 1 código, múltiplas mensagens (JSON) -> CEP não cadastrado e Município inválido
+        # Cenário 2: 1 código, múltiplas mensagens (JSON) -> CEP não cadastrado e Município inválido (Testa formato DD/MM/YYYY)
         {
             "protocolo": "PROT002",
-            "data": "2026-05-26 10:15:00",
+            "dhr_registro": "31/05/2026",
             "contratante": "98.765.432/0001-99",
             "funcionalidade": "Emitir CIOT",
             "cod_mensagem": '{"Codigo":"209"}',
@@ -119,6 +119,22 @@ def generate_mock_data():
         }
     ]
     
+    # Normaliza todas as colunas de data para dhr_registro e uniformiza o formato de data para DD/MM/YYYY HH:MM:SS
+    for r in mock_records:
+        val = r.get("data") or r.get("dhr_registro")
+        if val:
+            if "-" in val:
+                dt = datetime.strptime(val, "%Y-%m-%d %H:%M:%S")
+                new_val = dt.strftime("%d/%m/%Y %H:%M:%S")
+            elif "/" in val and len(val) == 10:
+                dt = datetime.strptime(val, "%d/%m/%Y")
+                new_val = dt.strftime("%d/%m/%Y %H:%M:%S")
+            else:
+                new_val = val
+            r["dhr_registro"] = new_val
+            if "data" in r:
+                r.pop("data")
+            
     df = pd.DataFrame(mock_records)
     file_path = os.path.join("uploads", "mock_antt_logs.csv")
     df.to_csv(file_path, sep=";", index=False, encoding="utf-8")
@@ -131,7 +147,7 @@ def run_validation():
     
     # 1. Gera dados mock
     file_path = generate_mock_data()
-    file_hash = "mock_hash_test_semantic_official_132"
+    file_hash = "mock_hash_test_semantic_official_136"
     
     # 2. Conecta ao DuckDB em memória
     conn = duckdb.connect()
@@ -167,7 +183,18 @@ def run_validation():
     print(df_ent)
     
     # Validações assertions
-    assert df_logs.shape[0] == 10, f"Erro: dim_log deve ter 10 linhas (teve {df_logs.shape[0]})!"
+    assert df_logs.shape[0] == 12, f"Erro: dim_log deve ter 12 linhas (teve {df_logs.shape[0]})!"
+    
+    # Valida que o mapeamento e parsing de dhr_registro (e formatos de data) funcionou
+    prot1_row = df_logs[df_logs["protocolo"] == "PROT001"].iloc[0]
+    assert prot1_row["data_evento"].year == 2026, f"Erro: PROT001 data_evento ano incorreto: {prot1_row['data_evento']}"
+    assert prot1_row["data_evento"].month == 5, f"Erro: PROT001 data_evento mês incorreto: {prot1_row['data_evento']}"
+    assert prot1_row["data_evento"].day == 26, f"Erro: PROT001 data_evento dia incorreto: {prot1_row['data_evento']}"
+    
+    prot2_row = df_logs[df_logs["protocolo"] == "PROT002"].iloc[0]
+    assert prot2_row["data_evento"].year == 2026, f"Erro: PROT002 data_evento ano incorreto: {prot2_row['data_evento']}"
+    assert prot2_row["data_evento"].month == 5, f"Erro: PROT002 data_evento mês incorreto: {prot2_row['data_evento']}"
+    assert prot2_row["data_evento"].day == 31, f"Erro: PROT002 data_evento dia incorreto: {prot2_row['data_evento']}"
     
     # PROT003 tinha 3 mensagens distintas. Deve gerar 3 rejeições
     p3_rejs = df_rejs[df_rejs["protocolo"] == "PROT003"]
