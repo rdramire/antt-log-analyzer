@@ -1389,6 +1389,7 @@ def render_normalized_rejections_tab(conn, where_clause: str):
     query = f"""
         WITH cohort_errors AS (
             SELECT
+                CAST(p.data_evento AS DATE) AS data,
                 p.funcionalidade,
                 COALESCE(NULLIF(r.mensagem_normalizada, ''), 'Erro de sistema ou resposta vazia') AS mensagem_normalizada,
                 COUNT(*) AS quantidade,
@@ -1400,16 +1401,17 @@ def render_normalized_rejections_tab(conn, where_clause: str):
             FROM fact_rejeicoes_semanticas r
             JOIN dim_log p ON p.log_id = r.log_id
             WHERE p.status_geral = 'ERRO' AND {where_clause}
-            GROUP BY 1, 2
+            GROUP BY 1, 2, 3
         )
         SELECT 
+            data,
             funcionalidade,
             mensagem_normalizada,
             quantidade,
             percentual_representatividade AS "% representatividade"
         FROM cohort_errors
         {search_cond}
-        ORDER BY quantidade DESC;
+        ORDER BY data DESC, quantidade DESC;
     """
     
     df = conn.execute(query).df()
@@ -1426,7 +1428,7 @@ def render_normalized_rejections_tab(conn, where_clause: str):
     with col_m1:
         st.metric("Total de Ocorrências (ERRO)", f"{total_quantidade:,}".replace(",", "."), help="Soma total das ocorrências nesta visão.")
     with col_m2:
-        st.metric("Tipos Únicos de Rejeição", f"{total_rows}", help="Quantidade de mensagens normalizadas distintas por funcionalidade.")
+        st.metric("Tipos Únicos de Rejeição por Dia", f"{total_rows}", help="Quantidade de mensagens normalizadas distintas por funcionalidade e por dia.")
         
     st.markdown("---")
     
@@ -1449,6 +1451,11 @@ def render_normalized_rejections_tab(conn, where_clause: str):
     st.dataframe(
         df_page,
         column_config={
+            "data": st.column_config.DateColumn(
+                "data",
+                format="DD/MM/YYYY",
+                help="Data em que ocorreu a rejeição"
+            ),
             "funcionalidade": st.column_config.TextColumn(
                 "funcionalidade",
                 width="medium",
@@ -1478,8 +1485,8 @@ def render_normalized_rejections_tab(conn, where_clause: str):
     st.markdown(
         f"""
         <div style="background-color: rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 5px; margin-top: -10px; display: flex; justify-content: space-between; font-weight: bold; border: 1px solid rgba(255, 255, 255, 0.1);">
-            <div style="flex: 2; padding-left: 10px;">Total</div>
-            <div style="flex: 3; text-align: left;"></div>
+            <div style="flex: 3; padding-left: 10px;">Total</div>
+            <div style="flex: 4; text-align: left;"></div>
             <div style="flex: 1; text-align: left; padding-left: 10px;">{total_quantidade:,}</div>
             <div style="flex: 1; text-align: left; padding-left: 10px;">100,000%</div>
         </div>
